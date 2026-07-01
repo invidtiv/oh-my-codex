@@ -3552,7 +3552,8 @@ function resolveCommandRedirectTarget(target: string, assignments: Map<string, s
 
 function extractDeepInterviewCommandRedirectTargets(command: string): string[] {
   const targets: string[] = [];
-  for (const match of command.matchAll(/(?:^|[^>])>{1,2}\s*(["']?)([^\s&|;<>]+)\1/g)) {
+  const commandOutsideHeredocBodies = stripHeredocBodiesForCommandScan(command);
+  for (const match of commandOutsideHeredocBodies.matchAll(/(?:^|[^>])>{1,2}\s*(["']?)([^\s&|;<>]+)\1/g)) {
     const candidate = safeString(match[2]).trim();
     if (candidate && !isNullDeviceRedirectTarget(candidate)) targets.push(candidate);
   }
@@ -3585,6 +3586,44 @@ function commandHasDestructiveGitSubcommand(command: string): boolean {
   }
   return false;
 }
+function commandHasPackageInstallIntent(command: string): boolean {
+  for (const segment of splitShellCommandSegments(stripHeredocBodiesForCommandScan(command))) {
+    const words = tokenizeShellWords(segment);
+    for (let index = 0; index < words.length; index += 1) {
+      const headBase = shellWordBaseName(words[index] ?? "");
+      if (headBase !== "npm" && headBase !== "pnpm" && headBase !== "yarn") continue;
+      const subcommandIndex = findPackageInstallSubcommandIndex(words, index + 1);
+      if (subcommandIndex === null) continue;
+      const subcommand = words[subcommandIndex] ?? "";
+      if (headBase === "npm" && (subcommand === "install" || subcommand === "i" || subcommand === "ci")) return true;
+      if (headBase === "pnpm" && (subcommand === "install" || subcommand === "i" || subcommand === "add")) return true;
+      if (headBase === "yarn" && (subcommand === "install" || subcommand === "add")) return true;
+    }
+  }
+  return false;
+}
+
+function findPackageInstallSubcommandIndex(words: string[], startIndex: number): number | null {
+  for (let index = startIndex; index < words.length; index += 1) {
+    const word = words[index] ?? "";
+    if (!word || word === "--") continue;
+    if (isShellAssignmentWord(word)) continue;
+    if (word === "-C" || word === "--prefix" || word === "--dir" || word === "--cwd" || word === "-w" || word === "--workspace") {
+      index += 1;
+      continue;
+    }
+    if (word.startsWith("--prefix=") || word.startsWith("--dir=") || word.startsWith("--cwd=") || word.startsWith("--workspace=")) continue;
+    if (/^-C.+/.test(word) || /^-w.+/.test(word)) continue;
+    if (word.startsWith("-")) continue;
+    return index;
+  }
+  return null;
+}
+
+function commandHasUntargetedPlanningForbiddenIntent(command: string): boolean {
+  return commandHasDestructiveGitSubcommand(command) || commandHasPackageInstallIntent(command);
+}
+
 
 function findGitSubcommandIndex(words: string[], startIndex: number): number | null {
   for (let index = startIndex; index < words.length; index += 1) {
@@ -3609,14 +3648,14 @@ function commandHasDeepInterviewWriteIntent(command: string): boolean {
     || /\bsed\s+(?:[^\n;&|]*\s)?-i(?:\b|['"])/.test(command)
     || /\b(?:python3?|node|perl|ruby)\b[\s\S]{0,260}\b(?:writeFileSync|writeFile|write_text|open\([^)]*["']w|File\.write|Path\()/.test(command)
     || commandHasDestructiveGitSubcommand(command)
-    || /\b(?:npm\s+(?:install|i|ci)|pnpm\s+(?:install|i)|yarn\s+(?:install|add))\b/.test(command);
+    || commandHasPackageInstallIntent(command);
 }
 
 function extractDeepInterviewCommandWriteTargets(command: string): string[] {
   const assignments = extractCommandLiteralAssignments(command);
   const targets = extractDeepInterviewCommandRedirectTargets(command)
     .map((target) => resolveCommandRedirectTarget(target, assignments));
-  for (const segment of splitShellCommandSegments(command)) {
+  for (const segment of splitShellCommandSegments(stripHeredocBodiesForCommandScan(command))) {
     const words = tokenizeShellWords(segment);
     for (let index = 0; index < words.length; index += 1) {
       if (shellWordBaseName(words[index] ?? "") !== "tee") continue;
@@ -5550,41 +5589,104 @@ function containsUnquotedProcessSubstitution(command: string): boolean {
   return false;
 }
 
+interface ShellHeredocOpener {
+  delimiter: string;
+  quoted: boolean;
+}
+
+function parseShellHeredocDelimiter(line: string, startIndex: number): ShellHeredocOpener | null {
+  let index = startIndex;
+  while (/\s/.test(line[index] ?? "")) index += 1;
+
+  let delimiter = "";
+  let quoted = false;
+  let quote: "'" | "\"" | null = null;
+  for (; index < line.length; index += 1) {
+    const char = line[index] ?? "";
+    if (char === "\\" && quote !== "'") {
+      quoted = true;
+      index += 1;
+      delimiter += line[index] ?? "";
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      if (quote === char) {
+        quote = null;
+      } else if (!quote) {
+        quote = char;
+        quoted = true;
+      } else {
+        delimiter += char;
+      }
+      continue;
+    }
+    if (!quote && (/\s/.test(char) || char === "|" || char === ";" || char === "&" || char === "<" || char === ">")) break;
+    delimiter += char;
+  }
+
+  return delimiter ? { delimiter, quoted } : null;
+}
+
+function extractShellHeredocOpeners(line: string): ShellHeredocOpener[] {
+  const openers: ShellHeredocOpener[] = [];
+  let quote: "'" | "\"" | null = null;
+  for (let index = 0; index < line.length - 1; index += 1) {
+    const char = line[index] ?? "";
+    if (char === "\\" && quote !== "'") {
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      if (quote === char) {
+        quote = null;
+      } else if (!quote) {
+        quote = char;
+      }
+      continue;
+    }
+    if (quote) continue;
+    if (char !== "<" || line[index + 1] !== "<" || line[index + 2] === "<") continue;
+    const delimiterStart = line[index + 2] === "-" ? index + 3 : index + 2;
+    const opener = parseShellHeredocDelimiter(line, delimiterStart);
+    if (opener) openers.push(opener);
+    index = delimiterStart;
+  }
+  return openers;
+}
+
 function stripHeredocBodiesForCommandScan(command: string): string {
   const lines = command.split("\n");
   const kept: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     kept.push(line);
-    const heredocMatch = line.match(/<<-?\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>|;&]+))/);
-    const delimiter = safeString(heredocMatch?.[1] ?? heredocMatch?.[2] ?? heredocMatch?.[3]).trim();
-    if (!delimiter) continue;
-    index += 1;
-    while (index < lines.length && (lines[index] ?? "").trim() !== delimiter) {
-      kept.push("");
+    const openers = extractShellHeredocOpeners(line);
+    for (const { delimiter } of openers) {
       index += 1;
+      while (index < lines.length && (lines[index] ?? "").trim() !== delimiter) {
+        kept.push("");
+        index += 1;
+      }
+      if (index < lines.length) kept.push(lines[index] ?? "");
     }
-    if (index < lines.length) kept.push(lines[index] ?? "");
   }
   return kept.join("\n");
 }
+
 
 function hasUnsafeUnquotedHeredocExpansion(command: string): boolean {
   const lines = normalizeShellLineContinuations(command).split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    const heredocMatch = line.match(/<<-?\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>|;&]+))/);
-    if (!heredocMatch) continue;
-    const quoted = Boolean(heredocMatch[1] || heredocMatch[2]);
-    const delimiter = safeString(heredocMatch[1] ?? heredocMatch[2] ?? heredocMatch[3]).trim();
-    if (!delimiter || quoted) continue;
-    index += 1;
-    const bodyLines: string[] = [];
-    while (index < lines.length && (lines[index] ?? "").trim() !== delimiter) {
-      bodyLines.push(lines[index] ?? "");
+    for (const { delimiter, quoted } of extractShellHeredocOpeners(line)) {
       index += 1;
+      const bodyLines: string[] = [];
+      while (index < lines.length && (lines[index] ?? "").trim() !== delimiter) {
+        bodyLines.push(lines[index] ?? "");
+        index += 1;
+      }
+      if (!quoted && isDynamicNestedCommandString(bodyLines.join("\n"))) return true;
     }
-    if (isDynamicNestedCommandString(bodyLines.join("\n"))) return true;
   }
   return false;
 }
@@ -5653,10 +5755,12 @@ function commandEndsPlanningPhase(cwd: string, command: string): boolean {
 
 function isAllowedDeepInterviewBashWrite(cwd: string, command: string): boolean {
   if (commandEndsPlanningPhase(cwd, command)) return false;
+  if (commandHasUntargetedPlanningForbiddenIntent(command)) return false;
   if (!commandHasDeepInterviewWriteIntent(command)) return true;
   const targets = extractDeepInterviewCommandWriteTargets(command);
   if (targets.some((target) => !isAllowedDeepInterviewArtifactPath(cwd, target))) return false;
   return targets.length > 0 && targets.every((target) => isAllowedDeepInterviewArtifactPath(cwd, target));
+
 }
 
 async function readActiveDeepInterviewStateForPreToolUse(
@@ -5761,6 +5865,7 @@ function isAllowedRalplanBashWrite(cwd: string, command: string): boolean {
     return beadsCommand.allowed && (targets.length === 0 || hasAllowedTargets);
   }
   if (commandEndsPlanningPhase(cwd, command)) return false;
+  if (commandHasUntargetedPlanningForbiddenIntent(command)) return false;
   if (!commandHasDeepInterviewWriteIntent(command)) return true;
   if (targets.some((target) => !isAllowedRalplanArtifactPath(cwd, target))) return false;
   return hasAllowedTargets;
@@ -5775,6 +5880,12 @@ function buildRalplanBashBlockedDetail(cwd: string, command: string): string {
   if (blockedTarget) {
     const operationClass = /\btee\s+(?:-a\s+)?/.test(command) ? "Bash tee write" : "Bash redirect write";
     return `${operationClass} target ${blockedTarget} is not under allowed planning artifact paths or metadata paths (${RALPLAN_ALLOWED_WRITE_PREFIXES.join(", ")})`;
+  }
+  if (commandHasPackageInstallIntent(command)) {
+    return "package installation commands are implementation actions and cannot be combined with allowed planning artifact writes";
+  }
+  if (commandHasDestructiveGitSubcommand(command)) {
+    return "destructive git commands are implementation actions and cannot be combined with allowed planning artifact writes";
   }
   const beadsCommand = classifyRalplanBeadsMetadataCommand(cwd, command);
   if (beadsCommand.present && !beadsCommand.allowed) {
