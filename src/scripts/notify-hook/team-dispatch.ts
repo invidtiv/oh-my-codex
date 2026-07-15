@@ -467,6 +467,11 @@ function explicitPaneIdentity(value) {
   return { provided: rawPaneId !== '', paneId: normalizeExactPaneId(rawPaneId), rawPaneId };
 }
 
+function positivePanePid(value) {
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : undefined;
+}
+
+
 function resolveAddressedWorker(request, config) {
   const workers = Array.isArray(config?.workers) ? config.workers : [];
   if (Number.isFinite(request?.worker_index)) {
@@ -479,10 +484,10 @@ function resolveAddressedWorker(request, config) {
 
 function resolveConfiguredPaneIdentity(request, config) {
   if (request.to_worker === 'leader-fixed') {
-    return { source: 'leader_pane_id', expectedPanePid: undefined, ...explicitPaneIdentity(config?.leader_pane_id) };
+    return { source: 'leader_pane_id', expectedPanePid: positivePanePid(config?.leader_pane_pid), ...explicitPaneIdentity(config?.leader_pane_id) };
   }
   const worker = resolveAddressedWorker(request, config);
-  const expectedPanePid = Number.isInteger(worker?.pid) && Number(worker.pid) > 0 ? Number(worker.pid) : undefined;
+  const expectedPanePid = positivePanePid(worker?.pid);
   return { source: 'worker_pane_id', expectedPanePid, ...explicitPaneIdentity(worker?.pane_id) };
 }
 
@@ -510,6 +515,9 @@ function resolveDispatchTarget(request, config) {
         };
       }
     }
+    if (!positivePanePid(configuredPane.expectedPanePid)) {
+      return { failure: 'missing_exact_pane_pid', paneId: requestPane.paneId, paneSource: configuredPane.source };
+    }
     return { target: { type: 'pane', value: requestPane.paneId }, exactPaneId: requestPane.paneId, expectedPanePid: configuredPane.expectedPanePid, source: 'request_pane_id', reason: 'explicit_request_pane_id' };
   }
   if (configuredPane.provided) {
@@ -518,6 +526,9 @@ function resolveDispatchTarget(request, config) {
     }
     if (configuredPane.paneId === hudPaneId) {
       return { failure: 'hud_pane_target', paneId: configuredPane.paneId, paneSource: configuredPane.source };
+    }
+    if (!positivePanePid(configuredPane.expectedPanePid)) {
+      return { failure: 'missing_exact_pane_pid', paneId: configuredPane.paneId, paneSource: configuredPane.source };
     }
     return { target: { type: 'pane', value: configuredPane.paneId }, exactPaneId: configuredPane.paneId, expectedPanePid: configuredPane.expectedPanePid, source: configuredPane.source, reason: configuredPane.source };
   }

@@ -3091,12 +3091,21 @@ export async function killWorker(
   }
 }
 
-// leaderPaneId: when provided, the kill is skipped if workerPaneId matches it.
-export function killWorkerByPaneId(workerPaneId: string, leaderPaneId?: string): void {
+// Explicit pane targets require their previously frozen positive PID. Blank pane
+// IDs remain absent compatibility values and never issue a direct pane effect.
+export function killWorkerByPaneId(
+  workerPaneId: string,
+  expectedPanePid?: number,
+  leaderPaneId?: string,
+): void {
+  if (!hasExplicitWorkerPaneId(workerPaneId)
+    || typeof expectedPanePid !== 'number'
+    || !Number.isSafeInteger(expectedPanePid)
+    || expectedPanePid <= 0) return;
   // Guard: never kill the leader's own pane.
   if (leaderPaneId && workerPaneId === leaderPaneId) return;
   const proof = readExactPaneProofSync(workerPaneId);
-  if (proof.status !== 'live') return;
+  if (proof.status !== 'live' || proof.pid !== expectedPanePid) return;
   runTmux(['kill-pane', '-t', proof.paneId]);
 }
 
@@ -3153,11 +3162,19 @@ export function readPaneTeamOwnerTagResult(paneId: string | null | undefined): P
   return { status: 'error', error: stderr || `tmux show-option exited ${result.status ?? 'unknown'}` };
 }
 
-export async function killWorkerByPaneIdAsync(workerPaneId: string, leaderPaneId?: string): Promise<void> {
+export async function killWorkerByPaneIdAsync(
+  workerPaneId: string,
+  expectedPanePid?: number,
+  leaderPaneId?: string,
+): Promise<void> {
+  if (!hasExplicitWorkerPaneId(workerPaneId)
+    || typeof expectedPanePid !== 'number'
+    || !Number.isSafeInteger(expectedPanePid)
+    || expectedPanePid <= 0) return;
   // Guard: never kill the leader's own pane.
   if (leaderPaneId && workerPaneId === leaderPaneId) return;
   const proof = await readExactPaneProof(workerPaneId);
-  if (proof.status !== 'live') return;
+  if (proof.status !== 'live' || proof.pid !== expectedPanePid) return;
   await runTmuxAsync(['kill-pane', '-t', proof.paneId]);
 }
 
@@ -3184,6 +3201,8 @@ export interface PaneTeardownOptions {
   hudPaneId?: string | null;
   graceMs?: number;
   expectedPanePids?: Readonly<Record<string, number>>;
+  /** Revalidates caller-owned authority after the final exact PID proof and before kill-pane. */
+  authorizePaneKill?: (paneId: string, proof: Extract<ExactPaneProof, { status: 'live' }>) => boolean;
 }
 
 export type SharedSessionShutdownTopology =
@@ -3481,6 +3500,16 @@ export async function teardownWorkerPanes(
         paneId,
         reason: 'pane_pid_changed',
         detail: `expected ${expectedPid}, got ${proof.pid}`,
+      });
+      break;
+    }
+
+    if (options.authorizePaneKill && !options.authorizePaneKill(proof.paneId, proof)) {
+      summary.proofUnavailable.push({
+        status: 'unavailable',
+        paneId: proof.paneId,
+        reason: 'pane_pid_changed',
+        detail: 'pane owner authorization changed',
       });
       break;
     }

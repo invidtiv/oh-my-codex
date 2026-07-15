@@ -133,13 +133,14 @@ async function writeCanonicalWatcherTeamFixture(
     },
     tmux_session: `${teamName}:0`,
     leader_pane_id: '%42',
+    leader_pane_pid: 4242,
     hud_pane_id: null,
     resize_hook_name: null,
     resize_hook_target: null,
     worker_count: 1,
     next_task_id: 1,
     workers: [
-      { name: 'worker-1', index: 1, pane_id: '%42', role: 'executor' },
+      { name: 'worker-1', index: 1, pane_id: '%42', pid: 4242, role: 'executor' },
     ],
     created_at: nowIso,
   };
@@ -148,8 +149,9 @@ async function writeCanonicalWatcherTeamFixture(
     name: teamName,
     tmux_session: `${teamName}:0`,
     leader_pane_id: '%42',
+    leader_pane_pid: 4242,
     workers: [
-      { name: 'worker-1', pane_id: '%42' },
+      { name: 'worker-1', pane_id: '%42', pid: 4242 },
     ],
   }, null, 2));
   await writeFile(join(teamDir, 'phase.json'), JSON.stringify({
@@ -207,6 +209,10 @@ cmd="$1"
 shift || true
 if [[ "$cmd" == "list-panes" && "$#" -eq 3 && "$1" == "-a" && "$2" == "-F" && "$3" == "#{pane_id}\t#{pane_dead}\t#{pane_pid}" ]]; then
   printf '%%42\t0\t4242\n'
+  exit 0
+fi
+if [[ "$cmd" == "show-option" && "\${@: -1}" == "@omx_team_pane_owner_id" ]]; then
+  printf '%s\n' 'team:dispatch-team'
   exit 0
 fi
 if [[ "$cmd" == "capture-pane" ]]; then
@@ -1314,6 +1320,7 @@ describe('notify-fallback watcher', () => {
         name: 'dispatch-team',
         tmux_session: 'omx-team-dispatch-team',
         leader_pane_id: '%42',
+        leader_pane_pid: 4242,
       }, null, 2));
 
       const watcherScript = new URL('../../../dist/scripts/notify-fallback-watcher.js', import.meta.url).pathname;
@@ -1608,7 +1615,7 @@ if [[ "$cmd" == "list-panes" ]]; then
     printf "%%42 12345\n%%10 12346\n%%11 12347\n"
     exit 0
   fi
-  echo "%42 1"
+  printf "%%42\t0\t12345\n%%10\t0\t12346\n%%11\t0\t12347\n"
   exit 0
 fi
 exit 0
@@ -1630,9 +1637,10 @@ exit 0
         name: 'dispatch-team',
         tmux_session: 'omx-team-dispatch-team',
         leader_pane_id: '%42',
+        leader_pane_pid: 12345,
         workers: [
-          { name: 'worker-1', index: 1, pane_id: '%10' },
-          { name: 'worker-2', index: 2, pane_id: '%11' },
+          { name: 'worker-1', index: 1, pane_id: '%10', pid: 12346 },
+          { name: 'worker-2', index: 2, pane_id: '%11', pid: 12347 },
         ],
       }, null, 2));
       await writeFile(join(wd, '.omx', 'state', 'team', 'dispatch-team', 'tasks', 'task-1.json'), JSON.stringify({
@@ -2137,6 +2145,13 @@ exit 0
       await writeFile(captureFile, '... ping ...');
 
       await initTeamState('dispatch-team', 'task', 'executor', 1, wd);
+      for (const fileName of ['config.json', 'manifest.v2.json']) {
+        const statePath = join(wd, '.omx', 'state', 'team', 'dispatch-team', fileName);
+        const state = JSON.parse(await readFile(statePath, 'utf8'));
+        state.workers[0].pane_id = '%42';
+        state.workers[0].pid = 4242;
+        await writeFile(statePath, JSON.stringify(state, null, 2));
+      }
       const queued = await enqueueDispatchRequest('dispatch-team', {
         kind: 'inbox',
         to_worker: 'worker-1',
@@ -3586,6 +3601,13 @@ exit 0
       ].join('\n'));
 
       await initTeamState('dispatch-team', 'task', 'executor', 1, wd);
+      for (const fileName of ['config.json', 'manifest.v2.json']) {
+        const statePath = join(wd, '.omx', 'state', 'team', 'dispatch-team', fileName);
+        const state = JSON.parse(await readFile(statePath, 'utf8'));
+        state.workers[0].pane_id = '%42';
+        state.workers[0].pid = 4242;
+        await writeFile(statePath, JSON.stringify(state, null, 2));
+      }
       const queued = await enqueueDispatchRequest('dispatch-team', {
         kind: 'inbox',
         to_worker: 'worker-1',

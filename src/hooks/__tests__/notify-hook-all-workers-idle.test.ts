@@ -277,6 +277,7 @@ describe('notify-hook all-workers-idle notification', () => {
         name: teamName,
         tmux_session: 'devsess:81',
         leader_pane_id: '%181',
+        leader_pane_pid: 12181,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -390,6 +391,7 @@ exit 0
         name: teamName,
         tmux_session: 'busy-all-idle:0',
         leader_pane_id: '%182',
+        leader_pane_pid: 12182,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -507,6 +509,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:8',
         leader_pane_id: '%99',
+        leader_pane_pid: 12099,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -768,6 +771,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-event',
         leader_pane_id: '%77',
+        leader_pane_pid: 12077,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -893,6 +897,7 @@ exit 0
         name: teamName,
         tmux_session: 'solo-session:0',
         leader_pane_id: '%13',
+        leader_pane_pid: 12013,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -953,6 +958,7 @@ exit 0
         permissions_snapshot: { approval_mode: 'unknown', sandbox_mode: 'unknown', network_access: true },
         tmux_session: 'correct-session:1',
         leader_pane_id: '%123',
+        leader_pane_pid: 12123,
         worker_count: 1,
         workers: [{ name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] }],
         next_task_id: 1,

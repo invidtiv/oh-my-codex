@@ -87,6 +87,7 @@ async function writeCanonicalTeamFixture(
     },
     tmux_session: `${teamName}:0`,
     leader_pane_id: '%97',
+    leader_pane_pid: 12097,
     hud_pane_id: null,
     resize_hook_name: null,
     resize_hook_target: null,
@@ -340,6 +341,7 @@ describe('notify-hook leader-side authority handoff', () => {
         name: teamName,
         tmux_session: 'handoff-sess:0',
         leader_pane_id: '%91',
+        leader_pane_pid: 12091,
       });
       await writeJson(join(stateDir, 'hud-state.json'), {
         last_turn_at: new Date(Date.now() - 300_000).toISOString(),
@@ -424,6 +426,7 @@ describe('notify-hook leader-side authority handoff', () => {
         name: teamName,
         tmux_session: 'omx-team-beta-active-status',
         leader_pane_id: '%92',
+        leader_pane_pid: 12092,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
         ],
@@ -496,6 +499,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'deep-interview-suppressed:0',
         leader_pane_id: '%97',
+        leader_pane_pid: 12097,
       });
       await writeJson(join(stateDir, 'hud-state.json'), {
         last_turn_at: new Date(Date.now() - 300_000).toISOString(),
@@ -543,6 +547,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'idle-sess:0',
         leader_pane_id: '%99',
+        leader_pane_pid: 12099,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -620,6 +625,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'idle-shutdown:0',
         leader_pane_id: '%96',
+        leader_pane_pid: 12096,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },
           { name: 'worker-2', index: 2, pane_id: '%11', role: 'executor' },
@@ -689,6 +695,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'idle-followup-reuse:0',
         leader_pane_id: '%97',
+        leader_pane_pid: 12097,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },
           { name: 'worker-2', index: 2, pane_id: '%11', role: 'executor' },
@@ -757,6 +764,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'idle-followup-relaunch:0',
         leader_pane_id: '%98',
+        leader_pane_pid: 12098,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },
           { name: 'worker-2', index: 2, pane_id: '%11', role: 'executor' },
@@ -824,6 +832,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'idle-global:0',
         leader_pane_id: '%97',
+        leader_pane_pid: 12097,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -964,6 +973,7 @@ describe('notify-hook team leader nudge', () => {
         leader: { session_id: 'sess-canonical-safe', worker_id: 'leader-fixed', role: 'coordinator' },
         tmux_session: 'bad:0',
         leader_pane_id: '%666',
+        leader_pane_pid: 12666,
         hud_pane_id: null,
         resize_hook_name: null,
         resize_hook_target: null,
@@ -1036,6 +1046,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%91',
+        leader_pane_pid: 12091,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -1099,6 +1110,7 @@ describe('notify-hook team leader nudge', () => {
         name: teamName,
         tmux_session: 'leader-nudge-teardown-race:0',
         leader_pane_id: '%91',
+        leader_pane_pid: 12091,
         workers: [{ name: 'worker-1', index: 1, pane_id: '%11' }],
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
@@ -1239,6 +1251,7 @@ exit 0
         name: teamName,
         tmux_session: 'leader-nudge-late-persist-race:0',
         leader_pane_id: '%91',
+        leader_pane_pid: 12091,
         workers: [{ name: 'worker-1', index: 1, pane_id: '%11' }],
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
@@ -1437,6 +1450,7 @@ exit 0
         name: teamName,
         tmux_session: 'busy-live-pane:0',
         leader_pane_id: '%93',
+        leader_pane_pid: 12093,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -1573,6 +1587,7 @@ exit 0
         name: teamName,
         tmux_session: 'ack-sess:0',
         leader_pane_id: '%94',
+        leader_pane_pid: 12094,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: ['1'] },
         ],
@@ -1641,6 +1656,7 @@ exit 0
         name: teamName,
         tmux_session: 'ack-started:0',
         leader_pane_id: '%95',
+        leader_pane_pid: 12095,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: ['1'] },
         ],
@@ -1720,6 +1736,7 @@ exit 0
         name: teamName,
         tmux_session: 'fresh-mailbox-bounded:0',
         leader_pane_id: '%97',
+        leader_pane_pid: 12097,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: ['1'] },
         ],
@@ -1780,6 +1797,7 @@ exit 0
         name: teamName,
         tmux_session: 'shell-guard:0',
         leader_pane_id: '%71',
+        leader_pane_pid: 12071,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -1892,6 +1910,7 @@ exit 0
         name: teamName,
         tmux_session: 'busy-leader-queue:0',
         leader_pane_id: '%73',
+        leader_pane_pid: 12073,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -2020,6 +2039,7 @@ exit 0
         name: teamName,
         tmux_session: 'capture-failure-live-leader:0',
         leader_pane_id: '%74',
+        leader_pane_pid: 12074,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -2153,6 +2173,7 @@ exit 0
         name: teamName,
         tmux_session: 'same-classified-state:0',
         leader_pane_id: '%75',
+        leader_pane_pid: 12075,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -2285,6 +2306,7 @@ exit 0
         name: teamName,
         tmux_session: 'scroll-guard:0',
         leader_pane_id: '%72',
+        leader_pane_pid: 12072,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -2449,6 +2471,7 @@ exit 0
         name: teamName,
         tmux_session: 'completed-reopen:0',
         leader_pane_id: '%91',
+        leader_pane_pid: 12091,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },
           { name: 'worker-2', index: 2, pane_id: '%11', role: 'executor' },
@@ -2520,6 +2543,7 @@ exit 0
         },
         tmux_session: 'other-session-team:0',
         leader_pane_id: '%94',
+        leader_pane_pid: 12094,
         worker_count: 2,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },
@@ -2597,6 +2621,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-beta',
         leader_pane_id: '%92',
+        leader_pane_pid: 12092,
       });
 
       // Leader HUD state is stale (last turn 5 minutes ago)
@@ -2650,6 +2675,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-stalled-progress',
         leader_pane_id: '%90',
+        leader_pane_pid: 12090,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
           { name: 'worker-2', index: 2, pane_id: '%11' },
@@ -2775,6 +2801,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-stalled-before-stale',
         leader_pane_id: '%89',
+        leader_pane_pid: 12089,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
           { name: 'worker-2', index: 2, pane_id: '%11' },
@@ -2903,6 +2930,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-worker-turn-stall-threshold',
         leader_pane_id: '%86',
+        leader_pane_pid: 12086,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
         ],
@@ -3004,6 +3032,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-active-turns-no-stall',
         leader_pane_id: '%87',
+        leader_pane_pid: 12087,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
           { name: 'worker-2', index: 2, pane_id: '%11' },
@@ -3122,6 +3151,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-stalled-before-stale-bounded',
         leader_pane_id: '%88',
+        leader_pane_pid: 12088,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
           { name: 'worker-2', index: 2, pane_id: '%11' },
@@ -3236,6 +3266,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-stale-no-workers',
         leader_pane_id: '%92',
+        leader_pane_pid: 12092,
         hud_pane_id: '%93',
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10' },
@@ -3283,6 +3314,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-fresh',
         leader_pane_id: '%95',
+        leader_pane_pid: 12095,
       });
       await writeJson(join(stateDir, 'hud-state.json'), {
         last_turn_at: new Date().toISOString(),
@@ -3327,6 +3359,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-stale-cadence',
         leader_pane_id: '%96',
+        leader_pane_pid: 12096,
       });
 
       const staleHud = {
@@ -3403,6 +3436,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-fresh-detached-progress',
         leader_pane_id: '%99',
+        leader_pane_pid: 12099,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', worktree_path: workerWorktree },
         ],
@@ -3502,6 +3536,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-gamma',
         leader_pane_id: '%93',
+        leader_pane_pid: 12093,
       });
       await writeJson(join(mailboxDir, 'leader-fixed.json'), {
         worker: 'leader-fixed',
@@ -3649,6 +3684,7 @@ exit 0
         name: teamName,
         tmux_session: 'idle-bounded:0',
         leader_pane_id: '%98',
+        leader_pane_pid: 12098,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
           { name: 'worker-2', index: 2, role: 'executor', assigned_tasks: [] },
@@ -3737,6 +3773,7 @@ exit 0
         name: teamName,
         tmux_session: 'omx-team-delta',
         leader_pane_id: '%94',
+        leader_pane_pid: 12094,
       });
 
       // Leader stale
@@ -3822,6 +3859,7 @@ exit 0
         },
         tmux_session: 'valid-team:0',
         leader_pane_id: '%94',
+        leader_pane_pid: 12094,
         worker_count: 1,
         workers: [
           { name: 'worker-1', index: 1, pane_id: '%10', role: 'executor' },

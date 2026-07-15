@@ -855,12 +855,18 @@ export async function scaleUp(
       const expectedSplitTargetPid = splitTargetWorker
         ? splitTargetWorker.pid
         : config.leader_pane_pid;
+      const expectedSplitTargetOwnerId = typeof config.tmux_pane_owner_id === 'string'
+        ? config.tmux_pane_owner_id.trim()
+        : '';
       if (
         typeof expectedSplitTargetPid !== 'number'
         || !Number.isSafeInteger(expectedSplitTargetPid)
         || expectedSplitTargetPid <= 0
       ) {
         return await rollbackScaleUp(`scale_up_split_target_pid_missing:${splitTarget}`);
+      }
+      if (!expectedSplitTargetOwnerId) {
+        return await rollbackScaleUp(`scale_up_split_target_owner_unavailable:${splitTarget}`);
       }
       const splitDirection = splitTarget === (config.leader_pane_id ?? '') ? '-h' : '-v';
 
@@ -1003,6 +1009,13 @@ export async function scaleUp(
       if (splitTargetProof.pid !== expectedSplitTargetPid) {
         return await rollbackScaleUp(
           `scale_up_split_target_pid_changed:${splitTarget}:${expectedSplitTargetPid}:${splitTargetProof.pid}`,
+          { workerName, worktreePath: workerWorkspace?.worktreePath },
+        );
+      }
+      const currentSplitTargetOwner = readPaneTeamOwnerTagResult(splitTargetProof.paneId);
+      if (currentSplitTargetOwner.status !== 'value' || currentSplitTargetOwner.value !== expectedSplitTargetOwnerId) {
+        return await rollbackScaleUp(
+          `scale_up_split_target_owner_changed:${splitTargetProof.paneId}`,
           { workerName, worktreePath: workerWorkspace?.worktreePath },
         );
       }
@@ -1634,6 +1647,10 @@ export async function reconcileScaleDownCleanupDebt(
         leaderPaneId: config.leader_pane_id,
         hudPaneId: config.hud_pane_id,
         expectedPanePids: { [pane.pane_id]: pane.pid },
+        authorizePaneKill: (paneId) => {
+          const currentOwner = readPaneTeamOwnerTagResult(paneId);
+          return currentOwner.status === 'value' && currentOwner.value === expectedOwnerId;
+        },
       });
       if (teardown.provenGonePaneIds.includes(pane.pane_id) || teardown.killedPaneIds.includes(pane.pane_id)) {
         resolvedPaneIds.add(pane.pane_id);
@@ -1932,12 +1949,21 @@ export async function scaleDown(
           const targetPaneIds = removableWorkers
             .map((worker) => worker.pane_id)
             .filter((paneId): paneId is string => typeof paneId === 'string' && paneId.trim().length > 0);
+          const expectedScaleDownOwnerId = typeof config.tmux_pane_owner_id === 'string'
+            ? config.tmux_pane_owner_id.trim()
+            : '';
           const paneTeardown = await teardownWorkerPanes(targetPaneIds, {
             leaderPaneId: config.leader_pane_id,
             hudPaneId: config.hud_pane_id,
             expectedPanePids: Object.fromEntries(removableWorkers
               .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
               .map((worker) => [worker.pane_id as string, worker.pid as number])),
+            authorizePaneKill: (paneId) => {
+              const currentOwner = readPaneTeamOwnerTagResult(paneId);
+              return Boolean(expectedScaleDownOwnerId)
+                && currentOwner.status === 'value'
+                && currentOwner.value === expectedScaleDownOwnerId;
+            },
           });
           const resolvedPaneIds = new Set([...paneTeardown.provenGonePaneIds, ...paneTeardown.killedPaneIds]);
           const unresolvedWorkers = removableWorkers.filter((worker) => (

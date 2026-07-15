@@ -26,7 +26,6 @@ import {
   sendToWorkerStdin,
   isWorkerAlive,
   isWorkerPaneOpen,
-  getWorkerPanePid,
   paneHasOmxInstanceTag,
   readPaneTeamOwnerTagResult,
   restoreStandaloneHudPane,
@@ -3362,11 +3361,18 @@ export async function startTeam(
         team_state_root: teamStateRoot,
       };
 
-      if (workerLaunchMode === 'interactive') {
-        const panePid = getWorkerPanePid(sessionName, workerIndex, paneId);
-        if (panePid) identity.pid = panePid;
-      } else if (config?.workers[workerIndex - 1]?.pid) {
-        identity.pid = config.workers[workerIndex - 1].pid;
+      const persistedPanePid = config?.workers[workerIndex - 1]?.pid;
+      if (workerLaunchMode === 'interactive' && paneId) {
+        if (typeof persistedPanePid !== 'number' || !Number.isSafeInteger(persistedPanePid) || persistedPanePid <= 0) {
+          throw new Error(`startup_worker_pane_pid_unavailable:${paneId}`);
+        }
+        const paneProof = readExactPaneProofSync(paneId);
+        if (paneProof.status !== 'live' || paneProof.pid !== persistedPanePid) {
+          throw new Error(`startup_worker_pane_identity_changed:${paneId}`);
+        }
+        identity.pid = persistedPanePid;
+      } else if (typeof persistedPanePid === 'number') {
+        identity.pid = persistedPanePid;
       }
 
       if (paneId) identity.pane_id = paneId;
@@ -3674,6 +3680,24 @@ export async function startTeam(
       // would otherwise destroy the retry evidence.
       assertPaneTeardownProofsAvailable('startup_rollback', error.proofUnavailable);
       throw error;
+    }
+    if (config && error instanceof Error && error.message.startsWith('startup_worker_pane_identity_changed:')) {
+      const startupCleanupDebt = config.workers.flatMap((worker) => {
+        if (!worker.pane_id || typeof worker.pid !== 'number' || !Number.isSafeInteger(worker.pid) || worker.pid <= 0) return [];
+        const proof = readExactPaneProofSync(worker.pane_id);
+        return proof.status === 'live' && proof.pid !== worker.pid
+          ? [{ status: 'unavailable' as const, paneId: worker.pane_id, reason: 'pane_pid_changed' as const, detail: `expected ${worker.pid}, got ${proof.pid}` }]
+          : [];
+      });
+      if (startupCleanupDebt.length > 0) {
+        await saveTeamConfig(config, leaderCwd);
+        await appendTeamEvent(sanitized, {
+          type: 'team_leader_nudge',
+          worker: 'leader-fixed',
+          reason: `startup_worker_pane_cleanup_debt:${startupCleanupDebt.map((proof) => `${proof.paneId}:${proof.reason}`).join(',')}; retry preserved session resources`,
+        }, leaderCwd).catch(() => {});
+        assertPaneTeardownProofsAvailable('startup_rollback', startupCleanupDebt);
+      }
     }
 
 
@@ -4478,20 +4502,16 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       .map((worker) => (typeof worker.pane_id === 'string' ? worker.pane_id.trim() : ''))
       .filter((paneId) => /^%[0-9]+$/.test(paneId))
       .filter((paneId) => paneId !== leaderPaneId && paneId !== hudPaneId));
-    // Every persisted worker pane is a canonical shutdown member. Shared-session
-    // topology may add only panes positively authorized by this team owner.
+    // Every persisted worker pane is a canonical shutdown member. Command markers
+    // only discover additional candidates; they cannot erase canonical membership.
     const canonicalExplicitWorkerPaneIds = new Set(explicitPersistedWorkerPaneIds);
-    if (sharedSessionTopology) {
-      const omittedCanonicalWorkerPaneIds = [...canonicalExplicitWorkerPaneIds]
-        .filter((paneId) => !sharedSessionTopology.teamWorkerPaneIds.includes(paneId));
-      if (omittedCanonicalWorkerPaneIds.length > 0) {
-        throw new Error(`shutdown_shared_session_canonical_worker_omitted:${omittedCanonicalWorkerPaneIds.join(',')}`);
-      }
-    }
     const initiallyTaggedWorkerPaneIds = new Set<string>();
     const authorizedDiscoveredWorkerPaneIds = sharedSessionTopology
       ? collectAuthorizedSharedSessionWorkerPaneIds(
-        sharedSessionTopology.teamWorkerPaneIds,
+        [...new Set([
+          ...canonicalExplicitWorkerPaneIds,
+          ...sharedSessionTopology.teamWorkerPaneIds,
+        ])],
         tmuxPaneOwnerId,
         canonicalExplicitWorkerPaneIds,
         undefined,
@@ -4615,6 +4635,10 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
 
 
         const persistedPid = config.workers.find((worker) => worker.pane_id?.trim() === proof.paneId)?.pid;
+        if (canonicalExplicitWorkerPaneIds.has(proof.paneId)
+          && (typeof persistedPid !== 'number' || !Number.isSafeInteger(persistedPid) || persistedPid <= 0)) {
+          return [{ status: 'unavailable' as const, paneId: proof.paneId, reason: 'pane_pid_changed' as const, detail: 'canonical persisted pane PID is missing' }];
+        }
         const expectedPid = typeof persistedPid === 'number' ? persistedPid : expectedSharedWorkerPanePids.get(proof.paneId);
         if (typeof expectedPid === 'number' && proof.pid !== expectedPid) {
           return [{ status: 'unavailable' as const, paneId: proof.paneId, reason: 'pane_pid_changed' as const, detail: `expected ${expectedPid}, got ${proof.pid}` }];
@@ -4624,7 +4648,28 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       });
       assertPaneTeardownProofsAvailable('shutdown', unavailable);
     };
-    if (sharedSessionTopology) assertCompleteSharedWorkerPaneProofs();
+    const frozenSharedWorkerOwnerIds = new Map<string, string | null>();
+    if (sharedSessionTopology) {
+      assertCompleteSharedWorkerPaneProofs();
+      for (const paneId of canonicalWorkerPaneIds) {
+        const owner = readPaneTeamOwnerTagResult(paneId);
+        if (owner.status === 'error') {
+          throw new Error(`shutdown_shared_session_worker_owner_unavailable:${paneId}:${owner.error}`);
+        }
+        if (owner.status === 'value') {
+          if (!tmuxPaneOwnerId || owner.value !== tmuxPaneOwnerId) {
+            throw new Error(`shutdown_shared_session_worker_owner_changed:${paneId}`);
+          }
+          frozenSharedWorkerOwnerIds.set(paneId, owner.value);
+        } else if (canonicalExplicitWorkerPaneIds.has(paneId)) {
+          // Legacy persisted workers may lack tags, but that absence is frozen and
+          // must remain absent through the adjacent pre-kill authorization.
+          frozenSharedWorkerOwnerIds.set(paneId, null);
+        } else {
+          throw new Error(`shutdown_shared_session_worker_owner_changed:${paneId}`);
+        }
+      }
+    }
     if (shouldPrekillInteractiveShutdownProcessTrees(sessionName)) {
       const paneProcessProofUnavailable: ExactPaneUnavailableProof[] = [];
       for (const paneId of shutdownPaneIds) {
@@ -4693,6 +4738,12 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         expectedPanePids: frozenHudAuthorization
           ? { [frozenHudAuthorization.paneId]: frozenHudAuthorization.pid }
           : undefined,
+        authorizePaneKill: frozenHudAuthorization
+          ? () => {
+            assertSharedPaneAuthorizationContinuous(frozenHudAuthorization, 'HUD pane');
+            return true;
+          }
+          : undefined,
       });
       assertPaneTeardownProofsAvailable('shutdown', hudTeardown.proofUnavailable);
       if (hudTeardown.kill.failed > 0) {
@@ -4748,13 +4799,24 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       {
         leaderPaneId: effectiveLeaderPaneId,
         hudPaneId: restoredHudPaneId ?? effectiveHudPaneId,
-      expectedPanePids: {
-        ...Object.fromEntries(expectedSharedWorkerPanePids),
-        ...Object.fromEntries(config.workers
-          .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
-          .map((worker) => [worker.pane_id as string, worker.pid as number])),
+        expectedPanePids: {
+          ...Object.fromEntries(expectedSharedWorkerPanePids),
+          ...Object.fromEntries(config.workers
+            .filter((worker) => typeof worker.pane_id === 'string' && typeof worker.pid === 'number')
+            .map((worker) => [worker.pane_id as string, worker.pid as number])),
+        },
+        authorizePaneKill: sharedSessionTopology
+          ? (paneId) => {
+            const expectedOwner = frozenSharedWorkerOwnerIds.get(paneId);
+            if (expectedOwner === undefined) return false;
+            const currentOwner = readPaneTeamOwnerTagResult(paneId);
+            return expectedOwner === null
+              ? currentOwner.status === 'missing'
+              : currentOwner.status === 'value' && currentOwner.value === expectedOwner;
+          }
+          : undefined,
       },
-    });
+    );
     assertPaneTeardownProofsAvailable('shutdown', workerTeardown.proofUnavailable);
     if (workerTeardown.kill.failed > 0) {
       throw new Error(`shutdown_pane_teardown_failed:${workerTeardown.kill.failedPaneIds.join(',')}`);

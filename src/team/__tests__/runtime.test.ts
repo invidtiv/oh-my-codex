@@ -2964,6 +2964,115 @@ esac
     }
   });
 
+  it('startTeam preserves the created worker PID when its pane is reused before startup state materializes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-startup-pane-pid-reuse-'));
+    const previousTmux = process.env.TMUX;
+    const previousTmuxPane = process.env.TMUX_PANE;
+    const previousLaunchMode = process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+    const previousWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    const previousSkipReadyWait = process.env.OMX_TEAM_SKIP_READY_WAIT;
+    const teamName = 'team-startup-pane-pid-reuse';
+
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-startup-pane-pid-reuse-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*) echo "120" ;;
+      *) echo "leader:0 %1" ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"-a -F #{pane_id}"*)
+        printf "%%1\\t0\\t2000001111\\n"
+        if [ -f "${tmuxLogPath}.worker-created" ]; then
+          if [ -f "${tmuxLogPath}.session-created" ]; then printf "%%2\\t0\\t2000009999\\n"; else printf "%%2\\t0\\t2000002222\\n"; fi
+        fi
+        if [ -f "${tmuxLogPath}.hud-created" ]; then printf "%%3\\t0\\t2000003333\\n"; fi
+        ;;
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        if [ -f "${tmuxLogPath}.worker-created" ]; then printf "%%2\\tcodex\\tcodex\\n"; fi
+        if [ -f "${tmuxLogPath}.hud-created" ]; then printf "%%3\\tnode\\thud --watch\\n"; fi
+        ;;
+      *) exit 0 ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*) : > "${tmuxLogPath}.worker-created"; echo "%2" ;;
+      *) : > "${tmuxLogPath}.hud-created"; echo "%3" ;;
+    esac
+    exit 0
+    ;;
+  set-option)
+    case "$*" in
+      *" mouse on"*) : > "${tmuxLogPath}.session-created" ;;
+    esac
+    exit 0
+    ;;
+  set-hook|run-shell|select-layout|set-window-option|select-pane|send-keys|kill-pane|kill-session)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+          binaries: [{ name: 'codex', content: fakeCodexShellScript('exit 0\n') }],
+        },
+        async ({ tmuxLogPath }) => {
+          delete process.env.TMUX;
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_TEAM_WORKER_LAUNCH_MODE = 'interactive';
+          process.env.OMX_TEAM_WORKER_CLI = 'codex';
+          process.env.OMX_TEAM_SKIP_READY_WAIT = '1';
+
+          await assert.rejects(
+            withoutTeamWorkerEnv(() => startTeam(
+              teamName,
+              'created worker pane PID reuse must fail closed',
+              'executor',
+              1,
+              [{ subject: 's', description: 'd', owner: 'worker-1' }],
+              cwd,
+            )),
+            /startup_rollback_pane_proof_unavailable:%2:pane_pid_changed/,
+          );
+
+          const stateRoot = join(cwd, '.omx', 'state', 'team');
+          assert.equal((await readdir(stateRoot)).length, 1);
+          const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+          assert.doesNotMatch(tmuxLog, /kill-pane -t %2/);
+        },
+      );
+    } finally {
+      if (typeof previousTmux === 'string') process.env.TMUX = previousTmux;
+      else delete process.env.TMUX;
+      if (typeof previousTmuxPane === 'string') process.env.TMUX_PANE = previousTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof previousLaunchMode === 'string') process.env.OMX_TEAM_WORKER_LAUNCH_MODE = previousLaunchMode;
+      else delete process.env.OMX_TEAM_WORKER_LAUNCH_MODE;
+      if (typeof previousWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = previousWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof previousSkipReadyWait === 'string') process.env.OMX_TEAM_SKIP_READY_WAIT = previousSkipReadyWait;
+      else delete process.env.OMX_TEAM_SKIP_READY_WAIT;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('startTeam saves interactive pane ids before concurrent readiness attempts', async () => {
     const source = await readFile(join(process.cwd(), 'src', 'team', 'runtime.ts'), 'utf-8');
     const applyMatch = source.match(
@@ -7899,7 +8008,7 @@ case "$1" in
         printf '%%10\\tzsh\\tzsh\\n%%13\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-kill-failure/worker-1 codex\\n'
         ;;
       *"-a -F #{pane_id}"*)
-        printf '%%10\t0\t2000000010\n%%13\t0\t999999\n'
+        printf '%%10\t0\t2000000010\n%%13\t0\t2000000013\n'
         ;;
       *)
         exit 1
@@ -7930,6 +8039,7 @@ esac
           config.hud_pane_id = null;
           config.tmux_pane_owner_id = 'owner-1';
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await assert.rejects(
@@ -8038,7 +8148,9 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%14';
+          config.workers[1]!.pid = 2000000014;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam(teamName, cwd, { force: true });
@@ -8083,7 +8195,8 @@ case "$1" in
   list-panes)
     case "$*" in
       *"-a -F #{pane_id}"*)
-        printf "%%10\t0\t2000000010\n%%15\t0\t2000000015\n"
+        printf "%%10\t0\t2000000010\n"
+        if [ ! -f "${tmuxLogPath}.killed-%15" ]; then printf "%%15\t0\t2000000015\n"; fi
         if [ ! -f "${tmuxLogPath}.killed-%12" ]; then printf "%%12\t0\t2000000012\n"; fi
         if [ ! -f "${tmuxLogPath}.killed-%13" ]; then printf "%%13\t0\t2000000013\n"; fi
         if [ -f "${tmuxLogPath}.hud-created" ]; then printf "%%44\t0\t2000000044\n"; fi
@@ -8093,7 +8206,7 @@ case "$1" in
         exit 1
         ;;
       *"-t leader:0 -F #{pane_id}"*"#{pane_current_command}"*)
-        printf "%%10\\tzsh\\tzsh\\n%%12\\tnode\\tnode /tmp/bin/omx.js hud --watch\\n%%13\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-stale-worker-pane-id/worker-1 codex\\n%%15\\tcodex\\tcodex unrelated-user-pane\\n"
+        printf "%%10\\tzsh\\tzsh\\n%%12\\tzsh\\tzsh\\n%%13\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-stale-worker-pane-id/worker-1 codex\\n%%15\\tcodex\\tcodex unrelated-user-pane\\n"
         exit 0
         ;;
       *)
@@ -8108,10 +8221,7 @@ case "$1" in
     ;;
   show-option)
     case "$*" in
-      *"-p -t %10 @omx_team_pane_owner_id"*)
-        echo "team:team-stale-worker-pane-id"
-        ;;
-      *"-p -t %12 @omx_team_pane_owner_id"*)
+      *"-p -t %13 @omx_team_pane_owner_id"*|*"-p -t %15 @omx_team_pane_owner_id"*)
         echo "team:team-stale-worker-pane-id"
         ;;
       *)
@@ -8145,16 +8255,16 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%15';
+          config.workers[1]!.pid = 2000000015;
           await saveTeamConfig(config, cwd);
 
-          await assert.rejects(
-            () => shutdownTeam(teamName, cwd, { force: true }),
-            /shutdown_shared_session_canonical_worker_omitted:%15/,
-          );
-
+          await shutdownTeam(teamName, cwd, { force: true });
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-          assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
+          assert.match(tmuxLog, /kill-pane -t %13/);
+          assert.match(tmuxLog, /kill-pane -t %15/);
+          assert.doesNotMatch(tmuxLog, /split-window|resize-pane|select-pane|run-shell/);
         },
       );
     } finally {
@@ -8244,7 +8354,9 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%14';
+          config.workers[1]!.pid = 2000000014;
           await saveTeamConfig(config, cwd);
 
           await assert.rejects(
@@ -8345,7 +8457,9 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%14';
+          config.workers[1]!.pid = 2000000014;
           await saveTeamConfig(config, cwd);
 
           await assert.rejects(
@@ -8653,7 +8767,9 @@ esac
             config.hud_pane_id = '%12';
             config.hud_pane_pid = 2000000012;
             config.workers[0]!.pane_id = '%13';
+            config.workers[0]!.pid = 2000000013;
             config.workers[1]!.pane_id = '%14';
+            config.workers[1]!.pid = 2000000014;
             await saveTeamConfig(config, cwd);
 
             await shutdownTeam('team-shutdown-win32-split', cwd, { force: true });
@@ -8756,7 +8872,9 @@ esac
             config.hud_pane_id = '%12';
             config.hud_pane_pid = 2000000012;
             config.workers[0]!.pane_id = '%23';
+            config.workers[0]!.pid = 2000000023;
             config.workers[1]!.pane_id = '%24';
+            config.workers[1]!.pid = 2000000024;
             await saveTeamConfig(config, cwd);
 
             await shutdownTeam(teamName, cwd, { force: true });
@@ -8830,6 +8948,7 @@ esac
         config.resize_hook_name = 'omx_resize_hud_prevalidation';
         config.resize_hook_target = 'leader:0';
         config.workers[0]!.pane_id = '%13';
+        config.workers[0]!.pid = 2000000013;
         await saveTeamConfig(config, cwd);
 
         await assert.rejects(() => shutdownTeam(teamName, cwd, { force: true }), /shutdown_shared_session_worker_owner_changed:%13/);
@@ -8891,6 +9010,7 @@ esac
         config.hud_pane_pid = 2000000012;
         config.tmux_pane_owner_id = 'team:team-hud-pid-continuity';
         config.workers[0]!.pane_id = '%13';
+        config.workers[0]!.pid = 2000000013;
         await saveTeamConfig(config, cwd);
 
         await assert.rejects(() => shutdownTeam(teamName, cwd, { force: true }), /shutdown_shared_session_HUD_pane_identity_changed:%12/);
@@ -8962,6 +9082,7 @@ esac
         config.hud_pane_pid = 2000000012;
         config.tmux_pane_owner_id = 'team:team-leader-owner-continuity';
         config.workers[0]!.pane_id = '%13';
+        config.workers[0]!.pid = 2000000013;
         await saveTeamConfig(config, cwd);
 
         await assert.rejects(() => shutdownTeam(teamName, cwd, { force: true }), /shutdown_shared_session_restore_leader_pane_owner_changed:%11/);
@@ -9059,7 +9180,9 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%14';
+          config.workers[1]!.pid = 2000000014;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam('team-shutdown-shared-session', cwd, { force: true });
@@ -9119,7 +9242,7 @@ case "$1" in
         exit 0
         ;;
       *"-t leader:0 -F #{pane_id}"*"#{pane_current_command}"*)
-        printf "%%11\\tzsh\\tzsh\\n%%12\\tnode\\texec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%11' node /tmp/bin/omx.js hud --watch\\n%%13\\tcodex\\tenv OMX_TEAM_INTERNAL_WORKER=team-shutdown-restore-hud/worker-2 codex\\n"
+        printf "%%11\\tzsh\\tzsh\\n%%12\\tnode\\texec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%11' node /tmp/bin/omx.js hud --watch\\n%%13\\tcodex\\tcodex\\n"
         exit 0
         ;;
       *"-t %11 -F #{pane_id}"*"#{pane_current_command}"*)
@@ -9175,7 +9298,11 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%12';
+          config.workers[0]!.pid = 2000000012;
           config.workers[1]!.pane_id = '%13';
+          config.workers[1]!.pid = 2000000013;
+          config.workers[0]!.pid = 2000000012;
+          config.workers[1]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam('team-shutdown-restore-hud', cwd, { force: true });
@@ -9295,14 +9422,15 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           config.workers[1]!.pane_id = '%99';
+          config.workers[1]!.pid = 2000000099;
           await saveTeamConfig(config, cwd);
 
           await assert.rejects(
             () => shutdownTeam(teamName, cwd, { force: true }),
-            /shutdown_shared_session_canonical_worker_omitted:%99/,
+            /shutdown_pane_proof_unavailable:%99:pane_proof_lost_during_process_teardown/,
           );
-
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
           assert.doesNotMatch(tmuxLog, /set-hook -u|kill-pane|split-window|resize-pane|select-pane|run-shell/);
         },
@@ -9403,6 +9531,7 @@ esac
           config.hud_pane_id = '%99';
           config.hud_pane_pid = 2000000099;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam(teamName, cwd, { force: true });
@@ -9514,6 +9643,7 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam(teamName, cwd, { force: true });
@@ -9629,6 +9759,7 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam(teamName, cwd, { force: true });
@@ -9732,6 +9863,7 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%13';
+          config.workers[0]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam(teamName, cwd, { force: true });
@@ -9798,8 +9930,11 @@ esac
           config.hud_pane_id = '%12';
           config.hud_pane_pid = 2000000012;
           config.workers[0]!.pane_id = '%11';
+          config.workers[0]!.pid = 2000000011;
           config.workers[1]!.pane_id = '%12';
+          config.workers[1]!.pid = 2000000012;
           config.workers[2]!.pane_id = '%13';
+          config.workers[2]!.pid = 2000000013;
           await saveTeamConfig(config, cwd);
 
           await shutdownTeam('team-shutdown-exclusions', cwd, { force: true });

@@ -208,6 +208,7 @@ describe('notify-hook per-worker idle notification', () => {
         name: teamName,
         tmux_session: 'missing-identity:0',
         leader_pane_id: '%77',
+        leader_pane_pid: 12077,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -319,6 +320,7 @@ describe('notify-hook per-worker idle notification', () => {
         name: teamName,
         tmux_session: 'devsess:21',
         leader_pane_id: '%79',
+        leader_pane_pid: 12079,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -430,6 +432,7 @@ exit 0
         name: teamName,
         tmux_session: 'busy-worker-idle:0',
         leader_pane_id: '%81',
+        leader_pane_pid: 12081,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -547,6 +550,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%57',
+        leader_pane_pid: 12057,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -595,6 +599,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%58',
+        leader_pane_pid: 12058,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -637,6 +642,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%59',
+        leader_pane_pid: 12059,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -691,6 +697,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%61',
+        leader_pane_pid: 12061,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -829,6 +836,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%62',
+        leader_pane_pid: 12062,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -889,6 +897,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%55',
+        leader_pane_pid: 12055,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -933,6 +942,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%70',
+        leader_pane_pid: 12070,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -996,6 +1006,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%71',
+        leader_pane_pid: 12071,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],
@@ -1086,6 +1097,7 @@ exit 0
         name: teamName,
         tmux_session: 'devsess:0',
         leader_pane_id: '%63',
+        leader_pane_pid: 12063,
         workers: [
           { name: 'worker-1', index: 1, role: 'executor', assigned_tasks: [] },
         ],

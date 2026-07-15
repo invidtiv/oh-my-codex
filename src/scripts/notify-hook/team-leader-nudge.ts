@@ -11,7 +11,7 @@ import { asNumber, safeString, isTerminalPhase } from './utils.js';
 import { readJsonIfExists, getScopedStateDirsForCurrentSession } from './state-io.js';
 import { runProcess } from './process-runner.js';
 import { logTmuxHookEvent } from './log.js';
-import { evaluatePaneInjectionReadiness, normalizeExactPaneId, queuePaneInput, sendPaneInput } from './team-tmux-guard.js';
+import { evaluatePaneInjectionReadiness, normalizeExactPaneId, sendPaneInput } from './team-tmux-guard.js';
 import { listNotifyCanonicalActiveTeams } from './active-team.js';
 import {
   classifyLeaderActionState,
@@ -35,6 +35,10 @@ const ACK_LIKE_PATTERNS = [
   /^(?:ok|okay|k|roger|copy|received|got it|understood|sounds good)[.!]*$/i,
   /^(?:on it|will do|i(?:'|')ll do it|working on it)[.!]*$/i,
 ];
+
+function positivePanePid(value) {
+  return Number.isInteger(value) && Number(value) > 0 ? Number(value) : undefined;
+}
 
 let atomicJsonWriteCounter = 0;
 
@@ -729,6 +733,7 @@ export async function maybeNudgeTeamLeader({
     let ownerSessionId = '';
     let workers = [];
     let hudPaneId = '';
+    let leaderPanePid;
     try {
       const manifestPath = join(omxDir, 'state', 'team', teamName, 'manifest.v2.json');
       const configPath = join(omxDir, 'state', 'team', teamName, 'config.json');
@@ -738,6 +743,7 @@ export async function maybeNudgeTeamLeader({
         tmuxSession = safeString(raw && raw.tmux_session ? raw.tmux_session : '').trim();
         leaderPaneId = safeString(raw && raw.leader_pane_id ? raw.leader_pane_id : '').trim();
         hudPaneId = safeString(raw && raw.hud_pane_id ? raw.hud_pane_id : '').trim();
+        leaderPanePid = positivePanePid(raw && raw.leader_pane_pid);
         ownerSessionId = safeString(raw && raw.leader && raw.leader.session_id ? raw.leader.session_id : '').trim();
         if (Array.isArray(raw && raw.workers)) workers = raw.workers;
       }
@@ -767,6 +773,10 @@ export async function maybeNudgeTeamLeader({
       ? normalizedLeaderPaneId
       : '';
     if (!tmuxSession && !canonicalLeaderPaneId) continue;
+    if (canonicalLeaderPaneId && !leaderPanePid) {
+      await recordSuppressedLeaderNudge({ logsDir, source, teamName, reason: 'leader_pane_pid_missing' });
+      continue;
+    }
     const tmuxTarget = canonicalLeaderPaneId;
     const paneStatus = tmuxSession
       ? await checkWorkerPanesAlive(tmuxSession, workerPaneIds)
@@ -1078,6 +1088,7 @@ export async function maybeNudgeTeamLeader({
       requireReady: false,
       requireIdle: false,
       exactPaneId: canonicalLeaderPaneId,
+      expectedPanePid: leaderPanePid,
     });
     if (!paneGuard.ok) {
       const deferredReason = paneGuard.reason === 'pane_running_shell'
@@ -1179,10 +1190,14 @@ export async function maybeNudgeTeamLeader({
       const leaderHasActiveTask = paneHasActiveTask(paneGuard.paneCapture);
       let deliveryMode = 'sent';
       if (leaderHasActiveTask) {
-        const sendResult = await queuePaneInput({
+        const sendResult = await sendPaneInput({
           paneTarget: tmuxTarget,
           prompt: markedText,
+          submitKeyPresses: 1,
+          submitDelayMs: 80,
+          queueFirstSubmit: true,
           exactPaneId: canonicalLeaderPaneId,
+          expectedPanePid: leaderPanePid,
         });
         if (!sendResult.ok) {
           throw new Error(sendResult.error || sendResult.reason);
@@ -1195,6 +1210,7 @@ export async function maybeNudgeTeamLeader({
           submitKeyPresses: 2,
           submitDelayMs: 100,
           exactPaneId: canonicalLeaderPaneId,
+          expectedPanePid: leaderPanePid,
         });
         if (!sendResult.ok) {
           throw new Error(sendResult.error || sendResult.reason);

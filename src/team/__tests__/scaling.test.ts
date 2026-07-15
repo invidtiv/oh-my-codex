@@ -229,6 +229,7 @@ async function writeSuccessfulScaleUpTmuxStub(
       'set -eu',
       `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
       'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
       '  -V)',
       '    echo "tmux 3.2a"',
       '    ;;',
@@ -245,6 +246,12 @@ async function writeSuccessfulScaleUpTmuxStub(
       '      *)',
       '        echo "42424"',
       '        ;;',
+      '    esac',
+      '    ;;',
+      '  show-option)',
+      '    case "$*" in',
+      '      *"@omx_team_pane_owner_id"*) echo "team:scale-up" ;;',
+      '      *) exit 1 ;;',
       '    esac',
       '    ;;',
       '  send-keys)',
@@ -271,7 +278,11 @@ async function configureScaleUpTeamForDirectDispatch(teamName: string, cwd: stri
     throw new Error(`missing team config for ${teamName}`);
   }
   config.tmux_session = `omx-team-${teamName}`;
+  config.tmux_pane_owner_id = 'team:scale-up';
   config.leader_pane_id = '%11';
+
+  config.tmux_pane_owner_id = 'team:scale-up';
+  config.leader_pane_pid = 42411;
   config.workers[0]!.pane_id = '%21';
   config.workers[0]!.pid = 42421;
   await saveTeamConfig(config, cwd);
@@ -774,6 +785,7 @@ exit 0
           'set -eu',
           `printf '\%s\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up-role" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -827,6 +839,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-scale-up-role';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up-role';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -1021,6 +1035,7 @@ printf '%s\\n' "$@" > '${capturePath}'
           'set -eu',
           `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up-owner-tag-rollback" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -1063,6 +1078,11 @@ printf '%s\\n' "$@" > '${capturePath}'
 
       await initTeamState('scale-up-owner-tag-rollback', 'task', 'executor', 1, cwd);
       await configureScaleUpTeamForDirectDispatch('scale-up-owner-tag-rollback', cwd);
+      const ownerConfig = await readTeamConfig('scale-up-owner-tag-rollback', cwd);
+      assert.ok(ownerConfig);
+      if (!ownerConfig) return;
+      ownerConfig.tmux_pane_owner_id = 'team:scale-up-owner-tag-rollback';
+      await saveTeamConfig(ownerConfig, cwd);
 
       const result = await scaleUp(
         'scale-up-owner-tag-rollback',
@@ -1122,6 +1142,7 @@ printf '%s\\n' "$@" > '${capturePath}'
         'set -eu',
         `printf '%s\\n' "$*" >> "${tmuxLogPath}"`,
         'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
         '  -V) echo "tmux 3.2a" ;;',
         '  split-window) echo "%31" ;;',
         '  list-panes)',
@@ -1601,6 +1622,7 @@ printf '%s\\n' "$@" > '${capturePath}'
           'set -eu',
           `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -1665,6 +1687,8 @@ printf '%s\\n' "$@" > '${capturePath}'
       if (!config) return;
       config.tmux_session = 'omx-team-scale-up-project-reasoning';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -1729,6 +1753,7 @@ printf '%s\\n' "$@" > '${capturePath}'
         `#!/bin/sh
 set -eu
 	case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V)
     echo "tmux 3.2a"
     ;;
@@ -1778,6 +1803,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-rollback-worktree';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -1826,6 +1853,7 @@ exit 0
         `#!/bin/sh
 set -eu
 	case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V)
     echo "tmux 3.2a"
     ;;
@@ -1872,6 +1900,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-canonical-root';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -1928,6 +1958,7 @@ exit 0
         `#!/bin/sh
 set -eu
 case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V)
     echo "tmux 3.2a"
     ;;
@@ -1977,6 +2008,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-frontier-role';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -2024,6 +2057,7 @@ exit 0
         `#!/bin/sh
 set -eu
 case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V)
     echo "tmux 3.2a"
     ;;
@@ -2070,6 +2104,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-mini-tuned-root';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -2123,6 +2159,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V)
     echo "tmux 3.2a"
     ;;
@@ -2162,6 +2199,8 @@ exit 0
       if (!config) return;
       config.tmux_session = 'omx-team-scale-up-layout';
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 42421;
       await saveTeamConfig(config, cwd);
@@ -2187,8 +2226,9 @@ exit 0
 
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
       const splitWindowIndex = tmuxCommands.findIndex((command) => command.startsWith('split-window '));
-      assert.ok(splitWindowIndex > 0);
-      assert.match(tmuxCommands[splitWindowIndex - 1]!, /^list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}$/);
+      assert.ok(splitWindowIndex > 1);
+      assert.equal(tmuxCommands[splitWindowIndex - 1], 'show-option -qv -p -t %21 @omx_team_pane_owner_id');
+      assert.match(tmuxCommands[splitWindowIndex - 2]!, /^list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}$/);
       assert.match(tmuxCommands[splitWindowIndex]!, /split-window -v -t %21/);
       assert.doesNotMatch(tmuxCommands.join('\n'), /select-layout .*tiled/);
 
@@ -2222,6 +2262,7 @@ exit 0
             'set -eu',
             `printf '%s\\n' "$*" >> "${tmuxLogPath}"`,
             'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
             '  -V)',
             '    echo "tmux 3.2a"',
             '    ;;',
@@ -2312,7 +2353,8 @@ exit 0
     const previousPath = process.env.PATH;
     try {
       await writeFile(tmuxStubPath, [
-        '#!/bin/sh', 'set -eu', `printf '%s\\n' "$*" >> "${tmuxLogPath}"`, 'case "${1:-}" in',
+        '#!/bin/sh', 'set -eu', `printf '%s\\n' "$*" >> "${tmuxLogPath}"`, 'case "${1:-}" in', '  show-option) echo "team:scale-up" ;;',
+          '  show-option) echo "team:scale-up" ;;',
         '  -V) echo "tmux 3.2a" ;;',
         "  list-panes) printf '%s\\t%s\\t%s\\n' '%21' '0' '52421' ;;",
         'esac', 'exit 0', '',
@@ -2351,6 +2393,7 @@ exit 0
           'set -eu',
           `printf '%s\\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -2440,6 +2483,7 @@ exit 0
         'set -eu',
         `printf '%s\\n' "$*" >> "${tmuxLogPath}"`,
         'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
         '  -V)',
         '    echo "tmux 3.2a"',
         '    ;;',
@@ -2530,6 +2574,7 @@ exit 0
           'set -eu',
           `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -2584,6 +2629,8 @@ exit 0
       if (!config) return;
       config.tmux_session = `omx-team-${teamName}`;
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 45452;
       await saveTeamConfig(config, repo);
@@ -2641,6 +2688,7 @@ exit 0
           'set -eu',
           `printf '%s\n' "$*" >> "${tmuxLogPath}"`,
           'case "${1:-}" in',
+          '  show-option) echo "team:scale-up" ;;',
           '  -V)',
           '    echo "tmux 3.2a"',
           '    ;;',
@@ -2696,6 +2744,8 @@ exit 0
       if (!config) return;
       config.tmux_session = `omx-team-${teamName}`;
       config.leader_pane_id = '%11';
+
+      config.tmux_pane_owner_id = 'team:scale-up';
       config.workers[0]!.pane_id = '%21';
       config.workers[0]!.pid = 46462;
       await saveTeamConfig(config, repo);
@@ -2753,6 +2803,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V) echo 'tmux 3.2a' ;;
   list-panes) printf '%s\\t%s\\t%s\\n' '%21' '0' '42421' ;;
 esac
@@ -2814,6 +2865,7 @@ esac
 set -eu
 printf '%s\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-up' ;;
   -V) echo 'tmux 3.2a' ;;
   list-panes)
     split_count=0; [ ! -f "${splitCountPath}" ] || split_count=$(cat "${splitCountPath}")
@@ -2911,8 +2963,14 @@ esac
         const mutationIndex = tmuxCommands.findIndex((command) => (
           command === mutationCommand || command.startsWith(`${mutationCommand} -c `)
         ));
-        assert.ok(mutationIndex > 0);
-        assert.equal(tmuxCommands[mutationIndex - 1], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
+        if (mutationCommand.startsWith('split-window ')) {
+          assert.ok(mutationIndex > 1);
+          assert.match(tmuxCommands[mutationIndex - 1]!, /^show-option -qv -p -t %(?:21|31) @omx_team_pane_owner_id$/);
+          assert.equal(tmuxCommands[mutationIndex - 2], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
+        } else {
+          assert.ok(mutationIndex > 0);
+          assert.equal(tmuxCommands[mutationIndex - 1], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
+        }
       }
       assert.ok(tmuxCommands.some((command) => command.startsWith('split-window -v -t %21 ')));
       assert.ok(tmuxCommands.some((command) => command.startsWith('split-window -v -t %31 ')));
@@ -3268,6 +3326,7 @@ describe('scaleDown teardown hardening', () => {
 set -eu
 printf '%s\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes)
     case "$*" in
       *"-a -F #{pane_id}"*)
@@ -3296,6 +3355,8 @@ esac
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%405';
+      config.workers[1]!.pid = 424405;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
 
       const result = await scaleDown(
@@ -3337,6 +3398,7 @@ esac
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes)
     case "$*" in
       *"#{pane_id}\t#{pane_dead}\t#{pane_pid}"*)
@@ -3365,9 +3427,14 @@ exit 0
       config.leader_pane_id = '%11';
       config.hud_pane_id = '%12';
       config.workers[0]!.pane_id = '%11';
+      config.workers[0]!.pid = 42411;
       config.workers[1]!.pane_id = '%12';
+      config.workers[1]!.pid = 42412;
       config.workers[2]!.pane_id = '%13';
+      config.workers[2]!.pid = 42413;
       config.workers[3]!.pane_id = '%14';
+      config.workers[3]!.pid = 42414;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
 
       const result = await scaleDown(
@@ -3383,6 +3450,7 @@ exit 0
       const tmuxCommands = (await readFile(tmuxLogPath, 'utf-8')).trim().split('\n');
       assert.deepEqual(tmuxCommands, [
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'show-option -qv -p -t %13 @omx_team_pane_owner_id',
         'kill-pane -t %13',
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
       ]);
@@ -3407,6 +3475,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes)
     if [ -f "${cwd}/pane-reused" ]; then
       printf '%s\t%s\t%s\n' '%13' '0' '42414'
@@ -3430,6 +3499,7 @@ exit 0
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
       const worktreePath = join(cwd, '.omx', 'team', 'kill-fail', 'worktrees', 'worker-2');
       await mkdir(worktreePath, { recursive: true });
       await writeFile(join(worktreePath, 'keep.txt'), 'retryable worktree');
@@ -3440,6 +3510,7 @@ exit 0
       await mkdir(join(cwd, '.omx', 'state', 'team', 'kill-fail', 'runtime'), { recursive: true });
       const startupScriptPath = workerStartupScriptPath(cwd, 'kill-fail', 'worker-2');
       await writeFile(startupScriptPath, '#!/bin/sh\n');
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
 
       const priorStatus = {
@@ -3472,6 +3543,7 @@ exit 0
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
       assert.deepEqual(tmuxCommands, [
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'show-option -qv -p -t %13 @omx_team_pane_owner_id',
         'kill-pane -t %13',
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
       ]);
@@ -3495,6 +3567,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes) printf '%s\\t%s\\t%s\\n' '%11' '0' '42411' ;;
 esac
 `,
@@ -3507,6 +3580,8 @@ esac
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const firstTask = await createTask('task-reconcile-fail', {
         subject: 'first reconciliation', description: 'must be restored after later failure', status: 'pending', owner: 'worker-2',
@@ -3555,6 +3630,8 @@ esac
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const task = await createTask('proof-unavailable', {
         subject: 'preserved', description: 'exact proof is unavailable', status: 'pending', owner: 'worker-2',
@@ -3602,6 +3679,8 @@ exit 0
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const first = await createTask('atomic-down', { subject: 'first', description: 'first', status: 'pending', owner: 'worker-2' }, cwd);
       const second = await createTask('atomic-down', { subject: 'second', description: 'second', status: 'pending', owner: 'worker-2' }, cwd);
@@ -3650,6 +3729,8 @@ exit 0
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const task = await createTask('rollback-recovery', { subject: 'owned', description: 'owned', status: 'pending', owner: 'worker-2' }, cwd);
       const failed = await scaleDown('rollback-recovery', cwd, { workerNames: ['worker-2'], force: true }, {
@@ -3751,6 +3832,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes)
     if [ -f "${proofLossMarkerPath}.recovery" ]; then
       if [ ! -f "${proofLossMarkerPath}.killed-13" ]; then printf '%s\t%s\t%s\n' '%13' '0' '42413'; fi
@@ -3784,6 +3866,7 @@ exit 0
       config.workers[1]!.pid = 42413;
       config.workers[2]!.pane_id = '%14';
       config.workers[2]!.pid = 42414;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       await writeFile(
         join(cwd, '.omx', 'state', 'team', 'success-proof-loss', 'workers', 'worker-2', 'identity.json'),
@@ -3827,8 +3910,9 @@ exit 0
       const tmuxCommands = await readScaleUpTmuxLogCommands(tmuxLogPath);
       assert.deepEqual(tmuxCommands.filter((command) => command.startsWith('kill-pane ')), ['kill-pane -t %13']);
       const killIndex = tmuxCommands.indexOf('kill-pane -t %13');
-      assert.ok(killIndex > 0);
-      assert.equal(tmuxCommands[killIndex - 1], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
+      assert.ok(killIndex > 1);
+      assert.equal(tmuxCommands[killIndex - 2], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
+      assert.equal(tmuxCommands[killIndex - 1], 'show-option -qv -p -t %13 @omx_team_pane_owner_id');
       assert.equal(tmuxCommands[killIndex + 1], 'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}');
       await writeFile(`${proofLossMarkerPath}.recovery`, '1');
       await rm(`${proofLossMarkerPath}.killed`, { force: true });
@@ -3865,6 +3949,7 @@ exit 0
 set -eu
 printf '%s\\n' "$*" >> "${tmuxLogPath}"
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes)
     if [ -f "${tmuxLogPath}.killed-%13" ]; then
       printf '%s\t%s\t%s\n' '%14' '0' '42414'
@@ -3887,7 +3972,10 @@ esac
       assert.ok(config);
       if (!config) return;
       config.workers[1]!.pane_id = '%13';
+      config.workers[1]!.pid = 42413;
       config.workers[2]!.pane_id = '%14';
+      config.workers[2]!.pid = 42414;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const resolvedTask = await createTask('gone-kill-fail', {
         subject: 'gone owner task', description: 'must be reclaimed', status: 'pending', owner: 'worker-2',
@@ -3921,9 +4009,11 @@ esac
       assert.deepEqual(debt.unresolved_panes.map((pane: { pane_id: string }) => pane.pane_id), ['%14']);
       assert.deepEqual(await readScaleUpTmuxLogCommands(tmuxLogPath), [
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'show-option -qv -p -t %13 @omx_team_pane_owner_id',
         'kill-pane -t %13',
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
         'list-panes -a -F #{pane_id}\t#{pane_dead}\t#{pane_pid}',
+        'show-option -qv -p -t %14 @omx_team_pane_owner_id',
         'kill-pane -t %14',
       ]);
     } finally {
@@ -3948,6 +4038,7 @@ esac
           tmuxStubPath,
           `#!/bin/sh
 case "\${1:-}" in
+  show-option) echo 'team:scale-down' ;;
   list-panes) printf '%s\\t%s\\t%s\\n' '%13' '0' '42413' ;;
   kill-pane) exit 1 ;;
 esac
@@ -3961,7 +4052,9 @@ esac
         assert.ok(config);
         if (!config) return;
         config.workers[1]!.pane_id = '%13';
-        await saveTeamConfig(config, cwd);
+        config.workers[1]!.pid = 42413;
+        config.tmux_pane_owner_id = 'team:scale-down';
+      await saveTeamConfig(config, cwd);
         const statusPath = join(cwd, '.omx', 'state', 'team', teamName, 'workers', 'worker-2', 'status.json');
         if (priorRaw === undefined) {
           await rm(statusPath, { force: true });
@@ -4028,6 +4121,7 @@ esac
       if (!config) return;
       config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
       config.worker_count = config.workers.length;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const workerDir = join(cwd, '.omx', 'state', 'team', 'zero-pane-debt', 'workers', 'worker-2');
       await mkdir(workerDir, { recursive: true });
@@ -4233,6 +4327,7 @@ exit 99
       config.workers[0]!.pid = 42413;
       config.workers = config.workers.filter((worker) => worker.name !== 'worker-2' && worker.name !== 'worker-3');
       config.worker_count = config.workers.length;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-survivor-collision', '.scale-down-cleanup-debt.json');
       const debt = {
@@ -4293,7 +4388,8 @@ esac
         if (!config) return;
         config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
         config.worker_count = config.workers.length;
-        await saveTeamConfig(config, cwd);
+        config.tmux_pane_owner_id = 'team:scale-down';
+      await saveTeamConfig(config, cwd);
         await writeFile(
           join(cwd, '.omx', 'state', 'team', 'debt-pane-authority', 'workers', 'worker-2', 'identity.json'),
           JSON.stringify({ name: 'worker-2', index: 2, pane_id: '%13', pid: 42413 }),
@@ -4331,6 +4427,7 @@ esac
       if (!config) return;
       config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
       config.worker_count = config.workers.length;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const workerDir = join(cwd, '.omx', 'state', 'team', 'debt-mismatched-binding', 'workers', 'worker-2');
       const sentinel = join(workerDir, 'must-remain');
@@ -4372,6 +4469,7 @@ case "$1" in list-panes) exit 0 ;; kill-pane) exit 99 ;; esac
       if (!config) return;
       config.workers = config.workers.filter((worker) => worker.name !== 'worker-2');
       config.worker_count = config.workers.length;
+      config.tmux_pane_owner_id = 'team:scale-down';
       await saveTeamConfig(config, cwd);
       const debtPath = join(cwd, '.omx', 'state', 'team', 'debt-legacy-gone', '.scale-down-cleanup-debt.json');
       await writeFile(debtPath, JSON.stringify({

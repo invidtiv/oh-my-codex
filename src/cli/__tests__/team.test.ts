@@ -1648,6 +1648,12 @@ case "$1" in
       *"-p -t %12 @omx_team_pane_owner_id"*)
         echo "team:shared-shutdown-cli"
         ;;
+      *"-p -t %13 @omx_team_pane_owner_id"*)
+        echo "team:shared-shutdown-cli"
+        ;;
+      *"-p -t %14 @omx_team_pane_owner_id"*)
+        echo "team:shared-shutdown-cli"
+        ;;
       *)
         exit 1
         ;;
@@ -1714,11 +1720,16 @@ esac
       const exactGlobalPaneProof = /^list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}$/;
       for (const paneId of ['%12', '%13', '%14']) {
         const killIndex = tmuxCommands.indexOf(`kill-pane -t ${paneId}`);
-        assert.ok(killIndex > 0, `expected teardown for ${paneId}`);
+        assert.ok(killIndex > 1, `expected teardown for ${paneId}`);
         assert.match(
-          tmuxCommands[killIndex - 1] ?? '',
+          tmuxCommands[killIndex - 2] ?? '',
           exactGlobalPaneProof,
-          `${paneId} teardown must immediately follow a fresh exact global proof`,
+          `${paneId} teardown must follow a fresh exact global proof`,
+        );
+        assert.equal(
+          tmuxCommands[killIndex - 1],
+          `show-option -qv -p -t ${paneId} @omx_team_pane_owner_id`,
+          `${paneId} teardown must immediately follow continuity authorization`,
         );
       }
       assert.doesNotMatch(tmuxLog, /list-panes -t %(12|13|14)\b/, 'explicit teardown panes must not use target-scoped fallback proof');

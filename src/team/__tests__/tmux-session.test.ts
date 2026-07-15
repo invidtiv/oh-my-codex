@@ -6725,8 +6725,8 @@ esac
         assert.equal(isWorkerPaneOpen('ignored-session', 1, '%1'), false);
         await assert.rejects(() => sendToWorker('ignored-session', 1, 'check inbox', '%1'), /not proven live/);
         await killWorker('ignored-session', 1, '%1');
-        killWorkerByPaneId('%1');
-        await killWorkerByPaneIdAsync('%1');
+        killWorkerByPaneId('%1', 1);
+        await killWorkerByPaneIdAsync('%1', 1);
 
         const log = await readFile(logPath, 'utf-8');
         assert.doesNotMatch(log, /list-panes -t ignored-session:1/);
@@ -7146,34 +7146,62 @@ describe('enableMouseScrolling', () => {
   });
 });
 
-describe('killWorkerByPaneId leader pane guard', () => {
-  it('skips kill when workerPaneId matches leaderPaneId (guard fires before tmux is called)', () => {
-    // With empty PATH tmux is unavailable, so any actual kill-pane call would fail.
-    // When the guard fires (paneId === leaderPaneId) the function returns early
-    // without invoking tmux, so no error is thrown regardless of PATH.
+describe('killWorkerByPaneId exact PID guard', () => {
+  it('skips kill when workerPaneId matches leaderPaneId before tmux is called', () => {
     withEmptyPath(() => {
-      assert.doesNotThrow(() => killWorkerByPaneId('%5', '%5'));
+      assert.doesNotThrow(() => killWorkerByPaneId('%5', 5, '%5'));
     });
   });
 
-  it('does not kill when a differing explicit pane ID cannot be proven live', () => {
-    // Different IDs bypass the leader guard, but a failed global proof still blocks the kill.
-    withEmptyPath(() => {
-      assert.doesNotThrow(() => killWorkerByPaneId('%5', '%6'));
-    });
-  });
-
-  it('rejects an invalid pane ID without reaching a target-specific tmux command', () => {
-    withEmptyPath(() => {
-      assert.doesNotThrow(() => killWorkerByPaneId('invalid', '%5'));
-    });
-  });
-
-  it('does not kill without a leader guard when the pane cannot be proven live', () => {
-    // Global proof failure is fail-closed even when no leader pane ID is provided.
+  it('requires a positive expected PID for an explicit direct pane kill', () => {
     withEmptyPath(() => {
       assert.doesNotThrow(() => killWorkerByPaneId('%5'));
+      assert.doesNotThrow(() => killWorkerByPaneId('%5', 0));
+      assert.doesNotThrow(() => killWorkerByPaneId('%5', -1));
     });
+  });
+
+  it('keeps blank pane IDs as no-effect compatibility values', () => {
+    withEmptyPath(() => {
+      assert.doesNotThrow(() => killWorkerByPaneId('', 5));
+      assert.doesNotThrow(() => killWorkerByPaneId('   ', 5));
+    });
+  });
+
+  it('does not kill a recycled pane ID when its current PID differs from the frozen PID', async () => {
+    await withMockTmuxFixture(
+      'omx-direct-kill-recycled-sync-',
+      (logPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+if [ "$1" = "list-panes" ]; then
+  printf '%%5\\t0\\t222\\n'
+fi
+`,
+      async ({ logPath }) => {
+        killWorkerByPaneId('%5', 111);
+        const log = await readFile(logPath, 'utf-8');
+        assert.match(log, /list-panes -a/);
+        assert.doesNotMatch(log, /kill-pane -t %5/);
+      },
+    );
+  });
+
+  it('does not kill a recycled pane ID asynchronously when its current PID differs from the frozen PID', async () => {
+    await withMockTmuxFixture(
+      'omx-direct-kill-recycled-async-',
+      (logPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${logPath}"
+if [ "$1" = "list-panes" ]; then
+  printf '%%5\\t0\\t222\\n'
+fi
+`,
+      async ({ logPath }) => {
+        await killWorkerByPaneIdAsync('%5', 111);
+        const log = await readFile(logPath, 'utf-8');
+        assert.match(log, /list-panes -a/);
+        assert.doesNotMatch(log, /kill-pane -t %5/);
+      },
+    );
   });
 });
 

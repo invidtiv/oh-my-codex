@@ -665,6 +665,7 @@ exit 0
       assert.ok(cfg);
       if (!cfg) throw new Error('missing team config');
       cfg.leader_pane_id = '%99';
+      cfg.leader_pane_pid = 9999;
       await saveTeamConfig(cfg, cwd);
 
       const msg = await sendDirectMessage('alpha', 'worker-1', 'leader-fixed', 'hello leader', cwd);
@@ -707,6 +708,7 @@ exit 0
       assert.ok(cfg);
       if (!cfg) throw new Error('missing team config');
       cfg.workers[0].pane_id = '%99';
+      cfg.workers[0].pid = 9999;
       await saveTeamConfig(cfg, cwd);
       await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
@@ -728,6 +730,76 @@ exit 0
     } finally {
       if (typeof previousPath === 'string') process.env.PATH = previousPath;
       else delete process.env.PATH;
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed without a canonical PID for explicit worker and leader panes', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-hook-missing-pane-pid-'));
+    try {
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.leader_pane_id = '%99';
+      await saveTeamConfig(config, cwd);
+      const worker = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox', to_worker: 'worker-1', worker_index: 1, trigger_message: 'do not send',
+      }, cwd);
+      const leader = await enqueueDispatchRequest('alpha', {
+        kind: 'nudge', to_worker: 'leader-fixed', trigger_message: 'leader do not send',
+      }, cwd);
+      const modulePath = new URL('../../../dist/scripts/notify-hook/team-dispatch.js', import.meta.url).pathname;
+      const mod = await import(pathToFileURL(modulePath).href);
+      const result = await mod.drainPendingTeamDispatch({ cwd, maxPerTick: 5 });
+      assert.equal(result.failed, 2);
+      assert.equal((await readDispatchRequest('alpha', worker.request.request_id, cwd))?.last_reason, 'missing_exact_pane_pid');
+      assert.equal((await readDispatchRequest('alpha', leader.request.request_id, cwd))?.last_reason, 'missing_exact_pane_pid');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not send when a guarded worker pane is reused before input effects', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-hook-pane-pid-reuse-'));
+    const fakeBinDir = join(cwd, 'fake-bin');
+    const tmuxLogPath = join(cwd, 'tmux.log');
+    const proofSequencePath = join(cwd, 'exact-pane-sequence.txt');
+    const previousPath = process.env.PATH;
+    try {
+      await mkdir(fakeBinDir, { recursive: true });
+      await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
+      await chmod(join(fakeBinDir, 'tmux'), 0o755);
+      await writeFile(proofSequencePath, [
+        '%42\\t0\\t4242', '%42\\t0\\t4242', '%42\\t0\\t4242',
+        '%42\\t0\\t4242', '%42\\t0\\t4242', '%42\\t0\\t4242',
+        '%42\\t0\\t5252',
+      ].join('\n'));
+      process.env.PATH = `${fakeBinDir}:${previousPath || ''}`;
+      process.env.OMX_TEST_EXACT_PANE_SEQUENCE_FILE = proofSequencePath;
+      await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
+      const queued = await enqueueDispatchRequest('alpha', {
+        kind: 'inbox', to_worker: 'worker-1', worker_index: 1, trigger_message: 'do not send',
+      }, cwd);
+      const modulePath = new URL('../../../dist/scripts/notify-hook/team-dispatch.js', import.meta.url).pathname;
+      const mod = await import(pathToFileURL(modulePath).href);
+      const result = await mod.drainPendingTeamDispatch({ cwd, maxPerTick: 5 });
+      assert.equal(result.failed, 1);
+      assert.equal((await readDispatchRequest('alpha', queued.request.request_id, cwd))?.last_reason, 'exact_pane_unavailable');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf8');
+      assert.doesNotMatch(tmuxLog, /(?:paste-buffer|send-keys) -t %42/, 'replacement pane must receive no input effect');
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      delete process.env.OMX_TEST_EXACT_PANE_SEQUENCE_FILE;
+      delete process.env.OMX_TEST_EXACT_PANE_COUNTER_FILE;
       await rm(cwd, { recursive: true, force: true });
     }
   });
@@ -933,6 +1005,7 @@ exit 0
       assert.ok(cfg);
       if (!cfg) throw new Error('missing team config');
       cfg.leader_pane_id = '%91';
+      cfg.leader_pane_pid = 9191;
       await saveTeamConfig(cfg, cwd);
 
       const msg = await sendDirectMessage('alpha', 'worker-1', 'leader-fixed', 'hello leader', cwd);
@@ -1073,6 +1146,7 @@ exit 0
       assert.ok(cfg);
       if (!cfg) throw new Error('missing team config');
       cfg.leader_pane_id = '%77';
+      cfg.leader_pane_pid = 7777;
       await saveTeamConfig(cfg, cwd);
 
       const msg = await sendDirectMessage('alpha', 'worker-1', 'leader-fixed', 'hello leader', cwd);
@@ -1490,6 +1564,12 @@ exit 0
       process.env.OMX_TEST_CAPTURE_FILE = captureFile;
 
       await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
       const queued = await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
         to_worker: 'worker-1',
@@ -1549,6 +1629,12 @@ exit 0
       process.env.OMX_TEST_CAPTURE_COUNTER_FILE = captureCounterFile;
 
       await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
       const queued = await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
         to_worker: 'worker-1',
@@ -1604,6 +1690,12 @@ exit 0
       process.env.OMX_TEST_CAPTURE_COUNTER_FILE = captureCounterFile;
 
       await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
       const queued = await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
         to_worker: 'worker-1',
@@ -1652,6 +1744,12 @@ exit 0
       process.env.OMX_TEST_CAPTURE_COUNTER_FILE = captureCounterFile;
 
       await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
       const queued = await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
         to_worker: 'worker-1',
@@ -1844,6 +1942,12 @@ exit 0
         process.env.OMX_TEST_EXACT_PANE_SEQUENCE_FILE = exactPaneSequencePath;
 
         await initTeamState('alpha', 'task', 'executor', 1, cwd);
+        const config = await readTeamConfig('alpha', cwd);
+        assert.ok(config?.workers[0]);
+        if (!config?.workers[0]) throw new Error('missing worker');
+        config.workers[0].pane_id = '%42';
+        config.workers[0].pid = 4242;
+        await saveTeamConfig(config, cwd);
         const queued = await enqueueDispatchRequest('alpha', {
           kind: 'inbox',
           to_worker: 'worker-1',
@@ -1956,6 +2060,12 @@ exit 0
       process.env.OMX_TEST_EXACT_PANE_SEQUENCE_FILE = exactPaneSequencePath;
 
       await initTeamState('alpha', 'task', 'executor', 1, cwd);
+      const config = await readTeamConfig('alpha', cwd);
+      assert.ok(config?.workers[0]);
+      if (!config?.workers[0]) throw new Error('missing worker');
+      config.workers[0].pane_id = '%42';
+      config.workers[0].pid = 4242;
+      await saveTeamConfig(config, cwd);
       const queued = await enqueueDispatchRequest('alpha', {
         kind: 'inbox',
         to_worker: 'worker-1',
