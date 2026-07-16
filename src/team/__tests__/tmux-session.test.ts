@@ -33,6 +33,8 @@ import {
   isTmuxAvailable,
   isWorkerPaneOpen,
   restoreStandaloneHudPane,
+  finalizeRestoredHudCleanupDebtSync,
+  reconcileRestoredHudCleanupDebtSync,
   translatePathForMsys,
   isWsl2,
   isWorkerAlive,
@@ -6197,7 +6199,27 @@ esac
 `;
         },
         async ({ logPath }) => {
-          const firstPaneId = restoreStandaloneHudPane('%11', cwd);
+          const firstPaneId = restoreStandaloneHudPane('%11', cwd, {
+            expectedLeaderPanePid: 2000000011,
+            expectedLeaderPaneOwnerId: 'team:restore-replay',
+          });
+          assert.equal(firstPaneId, '%44');
+          const debtPath = join(cwd, '.omx', 'state', '.restored-hud-cleanup-debt.json');
+          const crashWindowDebt = JSON.parse(await readFile(debtPath, 'utf-8')) as Record<string, unknown>;
+          assert.deepEqual(crashWindowDebt, {
+            schema_version: 1,
+            operation: 'restored_hud_cleanup',
+            pane_id: '%44',
+            pane_pid: 2000000044,
+            leader_pane_id: '%11',
+            leader_pane_pid: 2000000011,
+            leader_pane_owner_id: 'team:restore-replay',
+            hud_owner_leader_pane_id: '%11',
+          });
+          // The split may have survived a crash immediately before the config
+          // transaction; finalization is deliberately explicit and post-commit.
+          finalizeRestoredHudCleanupDebtSync(cwd, '%44', 2000000044);
+          await assert.rejects(() => readFile(debtPath, 'utf-8'));
           const secondPaneId = restoreStandaloneHudPane('%11', cwd);
 
           assert.equal(firstPaneId, '%44');
@@ -6208,6 +6230,70 @@ esac
           assert.equal(splitCount, 1);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %44/);
           assert.match(tmuxLog, /list-panes -t %11 -F #\{pane_id\}\t#\{pane_current_command\}\t#\{pane_start_command\}/);
+        },
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('replays only a pinned restored HUD with continuous leader owner and HUD identity', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-restored-hud-replay-'));
+    try {
+      await withMockTmuxFixture(
+        'omx-restored-hud-replay-',
+        (logPath) => {
+          const statePath = `${logPath}.killed`;
+          return `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  list-panes)
+    if [ "$2" = "-a" ]; then
+      printf '%%11\\t0\\t2000000011\\n'
+      if [ ! -f "${statePath}" ]; then printf '%%44\\t0\\t2000000044\\n'; fi
+    else
+      printf '%%11\\tzsh\\tzsh\\n'
+      if [ ! -f "${statePath}" ]; then printf "%%44\\tnode\\texec env OMX_TMUX_HUD_OWNER=1 OMX_TMUX_HUD_LEADER_PANE='%%11' /node /omx.js hud --watch\\n"; fi
+    fi
+    ;;
+  show-option)
+    if [ "$5" = "%11" ] && [ "$6" = "@omx_team_pane_owner_id" ]; then
+      printf 'team:restore-replay\n'
+    else
+      exit 1
+    fi
+    ;;
+  kill-pane) : > "${statePath}" ;;
+esac
+`;
+        },
+        async ({ logPath }) => {
+          const debtPath = join(cwd, '.omx', 'state', '.restored-hud-cleanup-debt.json');
+          await mkdir(dirname(debtPath), { recursive: true });
+          await writeFile(debtPath, `${JSON.stringify({
+            schema_version: 1,
+            operation: 'restored_hud_cleanup',
+            pane_id: '%44',
+            pane_pid: 2000000044,
+            leader_pane_id: '%11',
+            leader_pane_pid: 2000000011,
+            leader_pane_owner_id: 'team:restore-replay',
+            hud_owner_leader_pane_id: '%11',
+          })}\n`);
+
+          reconcileRestoredHudCleanupDebtSync(cwd);
+          await assert.rejects(() => readFile(debtPath, 'utf-8'));
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /kill-pane -t %44/);
+          assert.match(
+            tmuxLog,
+            /list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nshow-option -qv -p -t %11 @omx_team_pane_owner_id\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nlist-panes -t %11 -F #\{pane_id\}\t#\{pane_current_command\}\t#\{pane_start_command\}/,
+          );
+          assert.match(
+            tmuxLog,
+            /list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nshow-option -qv -p -t %11 @omx_team_pane_owner_id\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}\nkill-pane -t %44\nlist-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}/,
+          );
         },
       );
     } finally {

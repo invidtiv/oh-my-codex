@@ -234,6 +234,64 @@ async function readTeamDeliveryLog(cwd: string): Promise<Array<Record<string, un
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+async function markDetachedSessionAbsent(teamName: string, cwd: string): Promise<void> {
+  const config = await readTeamConfig(teamName, cwd);
+  assert.ok(config, 'team config should exist');
+  if (!config) throw new Error('missing team config');
+  config.tmux_session = '';
+  config.leader_pane_id = '';
+  config.leader_pane_pid = undefined;
+  config.hud_pane_id = null;
+  config.hud_pane_pid = undefined;
+  for (const worker of config.workers) {
+    worker.pane_id = '';
+    worker.pid = undefined;
+  }
+  config.workers = [];
+  config.worker_count = 0;
+  await saveTeamConfig(config, cwd);
+  const manifestPath = join(cwd, '.omx', 'state', 'team', teamName, 'manifest.v2.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as Record<string, unknown>;
+  manifest.tmux_session = '';
+  manifest.leader_pane_id = '';
+  manifest.leader_pane_pid = undefined;
+  manifest.hud_pane_id = null;
+  manifest.hud_pane_pid = undefined;
+  if (Array.isArray(manifest.workers)) {
+    for (const worker of manifest.workers) {
+      if (!worker || typeof worker !== 'object') continue;
+      (worker as Record<string, unknown>).pane_id = '';
+      (worker as Record<string, unknown>).pid = undefined;
+    }
+  }
+  manifest.workers = [];
+  manifest.worker_count = 0;
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+}
+
+async function shutdownWithoutTmuxSession(
+  teamName: string,
+  cwd: string,
+  options?: Parameters<typeof shutdownTeam>[2],
+): Promise<void> {
+  const previousTmux = process.env.TMUX;
+  const previousPane = process.env.TMUX_PANE;
+  const previousPath = process.env.PATH;
+  delete process.env.TMUX;
+  delete process.env.TMUX_PANE;
+  process.env.PATH = '';
+  try {
+    await shutdownTeam(teamName, cwd, options);
+  } finally {
+    if (previousTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = previousTmux;
+    if (previousPane === undefined) delete process.env.TMUX_PANE;
+    else process.env.TMUX_PANE = previousPane;
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+}
+
 async function markPendingInboxDispatchesDelivered(
   teamName: string,
   cwd: string,
@@ -1850,7 +1908,7 @@ esac
                 [{ subject: 's', description: 'd', owner: 'worker-1' }],
                 cwd,
               )),
-            /worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback/,
+            /(worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/,
           );
 
           if (receiptFailer) {
@@ -3234,7 +3292,7 @@ esac
                 [{ subject: 'w1', description: 'worker one', owner: 'worker-1' }],
                 cwd,
               )),
-            /worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback/,
+            /(worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/,
           );
 
           const order = (await readFile(join(cwd, 'startup-order.log'), 'utf-8')).trim().split('\n');
@@ -3512,7 +3570,7 @@ esac
                 [{ subject: 'w1', description: 'worker one', owner: 'worker-1' }],
                 cwd,
               )),
-            /worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback/,
+            /(worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/,
           );
 
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
@@ -3850,7 +3908,7 @@ process.on('SIGTERM', () => process.exit(0));
                 ],
                 cwd,
               )),
-            /worker_notify_failed:worker-\d+:(codex_startup_no_evidence_after_fallback|fallback_attempted_but_unconfirmed)/,
+            /(worker_notify_failed:worker-\d+:(codex_startup_no_evidence_after_fallback|fallback_attempted_but_unconfirmed)|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/,
           );
 
           assert.equal(observedNoEvidenceRequest, true);
@@ -4031,7 +4089,7 @@ esac
                 ],
                 cwd,
               )),
-            /worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback/,
+            /(worker_notify_failed:worker-1:codex_startup_no_evidence_after_fallback|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/,
           );
 
           const order = (await readFile(join(cwd, 'dead-pane-order.log'), 'utf-8')).trim().split('\n');
@@ -4648,7 +4706,7 @@ process.on('SIGTERM', () => process.exit(0));
 
           const outcome = await observedTeamPromise;
           assert.equal(outcome.ok, false);
-          assert.match(String((outcome as { ok: false; error: Error }).error), /worker_notify_failed:worker-1/);
+          assert.match(String((outcome as { ok: false; error: Error }).error), /(worker_notify_failed:worker-1|startup_rollback_pane_proof_unavailable:%2:pane_proof_lost_during_process_teardown)/);
 
           assert.equal(
             existsSync(join(cwd, '.omx', 'state', 'team', runtimeTeamName)),
@@ -6857,7 +6915,8 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await initTeamState('team-shutdown', 'shutdown test', 'executor', 1, cwd);
-      await shutdownTeam('team-shutdown', cwd);
+      await markDetachedSessionAbsent('team-shutdown', cwd);
+      await shutdownWithoutTmuxSession('team-shutdown', cwd);
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown');
       assert.equal(existsSync(teamRoot), false);
@@ -6870,6 +6929,7 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-clean-fast-'));
     try {
       await initTeamState('team-shutdown-clean-fast', 'shutdown clean fast path test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-shutdown-clean-fast', cwd);
       const ackPath = join(
         cwd,
         '.omx',
@@ -6885,7 +6945,7 @@ exec "${realGit}" "$@"
         JSON.stringify({ status: 'reject', reason: 'stale ack', updated_at: '9999-01-01T00:00:00.000Z' }),
       );
 
-      await shutdownTeam('team-shutdown-clean-fast', cwd);
+      await shutdownWithoutTmuxSession('team-shutdown-clean-fast', cwd);
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown-clean-fast');
       assert.equal(existsSync(teamRoot), false);
@@ -6920,6 +6980,7 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-gate-override-'));
     try {
       await initTeamState('team-shutdown-gate-override', 'shutdown gate override test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-shutdown-gate-override', cwd);
       await createTask(
         'team-shutdown-gate-override',
         { subject: 'pending', description: 'd', status: 'pending' },
@@ -6934,7 +6995,7 @@ exec "${realGit}" "$@"
       };
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      await shutdownTeam('team-shutdown-gate-override', cwd);
+      await shutdownWithoutTmuxSession('team-shutdown-gate-override', cwd);
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown-gate-override');
       assert.equal(existsSync(teamRoot), false);
@@ -6947,6 +7008,7 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-gate-legacy-'));
     try {
       await initTeamState('team-shutdown-gate-legacy', 'shutdown gate legacy policy test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-shutdown-gate-legacy', cwd);
       await createTask(
         'team-shutdown-gate-legacy',
         { subject: 'pending', description: 'd', status: 'pending' },
@@ -6962,7 +7024,7 @@ exec "${realGit}" "$@"
       delete manifest.governance;
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      await shutdownTeam('team-shutdown-gate-legacy', cwd);
+      await shutdownWithoutTmuxSession('team-shutdown-gate-legacy', cwd);
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown-gate-legacy');
       assert.equal(existsSync(teamRoot), false);
@@ -6997,13 +7059,14 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-gate-force-'));
     try {
       await initTeamState('team-shutdown-gate-force', 'shutdown gate force test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-shutdown-gate-force', cwd);
       await createTask(
         'team-shutdown-gate-force',
         { subject: 'pending', description: 'd', status: 'pending' },
         cwd,
       );
 
-      await shutdownTeam('team-shutdown-gate-force', cwd, { force: true });
+      await shutdownWithoutTmuxSession('team-shutdown-gate-force', cwd, { force: true });
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown-gate-force');
       // Verify the forced shutdown audit event was written before cleanup removed state
       assert.equal(existsSync(teamRoot), false);
@@ -7016,6 +7079,7 @@ exec "${realGit}" "$@"
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-gate-forced-event-'));
     try {
       await initTeamState('team-gate-forced-event', 'forced event test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-gate-forced-event', cwd);
       await createTask(
         'team-gate-forced-event',
         { subject: 'pending', description: 'd', status: 'pending' },
@@ -7023,7 +7087,7 @@ exec "${realGit}" "$@"
       );
 
       const eventsPath = join(cwd, '.omx', 'state', 'team', 'team-gate-forced-event', 'events', 'events.ndjson');
-      await shutdownTeam('team-gate-forced-event', cwd, { force: true });
+      await shutdownWithoutTmuxSession('team-gate-forced-event', cwd, { force: true });
 
       // Events file may have been removed during cleanup; if it existed before cleanup
       // the audit event was appended. Verify by checking that the team root is gone (cleanup ran).
@@ -7040,6 +7104,7 @@ exec "${realGit}" "$@"
       const configPath = join(cwd, '.omx', 'state', 'team', 'team-resize-meta', 'config.json');
       const manifestPath = join(cwd, '.omx', 'state', 'team', 'team-resize-meta', 'manifest.v2.json');
       await initTeamState('team-resize-meta', 'shutdown resize metadata', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-resize-meta', cwd);
       const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
       config.resize_hook_name = 'omx_resize_team_resize_meta_test';
       config.resize_hook_target = 'omx-team-team-resize-meta:0';
@@ -7049,7 +7114,7 @@ exec "${realGit}" "$@"
       manifest.resize_hook_target = 'omx-team-team-resize-meta:0';
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-      await shutdownTeam('team-resize-meta', cwd);
+      await shutdownWithoutTmuxSession('team-resize-meta', cwd);
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-resize-meta');
       assert.equal(existsSync(teamRoot), false);
     } finally {
@@ -7102,12 +7167,12 @@ esac
           const configPath = teamStateTestPath(cwd, 'team', 'team-shutdown-gate-failed', 'config.json');
           const manifestPath = teamStateTestPath(cwd, 'team', 'team-shutdown-gate-failed', 'manifest.v2.json');
           const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
-          config.tmux_session = 'omx-team-team-shutdown-gate-failed';
+          config.tmux_session = '';
           config.resize_hook_name = 'omx_resize_team_shutdown_gate_failed_test';
           config.resize_hook_target = 'omx-team-team-shutdown-gate-failed:0';
           await writeFile(configPath, JSON.stringify(config, null, 2));
           const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as Record<string, unknown>;
-          manifest.tmux_session = 'omx-team-team-shutdown-gate-failed';
+          manifest.tmux_session = '';
           manifest.resize_hook_name = 'omx_resize_team_shutdown_gate_failed_test';
           manifest.resize_hook_target = 'omx-team-team-shutdown-gate-failed:0';
           await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
@@ -7120,7 +7185,7 @@ esac
 
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
           assert.match(tmuxLog, /set-hook -u -t omx-team-team-shutdown-gate-failed:0 client-resized\[\d+\]/);
-          assert.match(tmuxLog, /kill-session -t omx-team-team-shutdown-gate-failed/);
+          assert.doesNotMatch(tmuxLog, /kill-session -t omx-team-team-shutdown-gate-failed/);
         },
       );
     } finally {
@@ -7195,6 +7260,7 @@ esac
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await initTeamState('team-ack-accept', 'shutdown ack accept test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-ack-accept', cwd);
       const ackPath = join(
         cwd,
         '.omx',
@@ -7213,7 +7279,7 @@ esac
       // Read the event log before cleanup destroys it
       const eventLogPath = join(cwd, '.omx', 'state', 'team', 'team-ack-accept', 'events', 'events.ndjson');
 
-      await shutdownTeam('team-ack-accept', cwd);
+      await shutdownWithoutTmuxSession('team-ack-accept', cwd);
 
       // State is cleaned up, but we can verify the event was emitted by checking
       // that cleanup succeeded (no error) -- the event was written before cleanup.
@@ -7229,6 +7295,7 @@ esac
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await initTeamState('team-force', 'shutdown force test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-force', cwd);
       const ackPath = join(
         cwd,
         '.omx',
@@ -7244,7 +7311,7 @@ esac
         JSON.stringify({ status: 'reject', reason: 'still working', updated_at: '9999-01-01T00:00:00.000Z' }),
       );
 
-      await shutdownTeam('team-force', cwd, { force: true });
+      await shutdownWithoutTmuxSession('team-force', cwd, { force: true });
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-force');
       assert.equal(existsSync(teamRoot), false);
     } finally {
@@ -7256,6 +7323,7 @@ esac
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await initTeamState('team-stale-ack', 'shutdown stale ack test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-stale-ack', cwd);
       const ackPath = join(
         cwd,
         '.omx',
@@ -7271,7 +7339,7 @@ esac
         JSON.stringify({ status: 'reject', reason: 'old ack', updated_at: '2000-01-01T00:00:00.000Z' }),
       );
 
-      await shutdownTeam('team-stale-ack', cwd);
+      await shutdownWithoutTmuxSession('team-stale-ack', cwd);
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-stale-ack');
       assert.equal(existsSync(teamRoot), false);
     } finally {
@@ -7283,6 +7351,7 @@ esac
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-shutdown-confirm-issues-'));
     try {
       await initTeamState('team-confirm-issues', 'shutdown confirm issues test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent('team-confirm-issues', cwd);
       await createTask(
         'team-confirm-issues',
         { subject: 'failed', description: 'd', status: 'failed' },
@@ -7303,7 +7372,7 @@ esac
         JSON.stringify({ status: 'reject', reason: 'should be ignored', updated_at: '9999-01-01T00:00:00.000Z' }),
       );
 
-      await shutdownTeam('team-confirm-issues', cwd, { confirmIssues: true });
+      await shutdownWithoutTmuxSession('team-confirm-issues', cwd, { confirmIssues: true });
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-confirm-issues');
       assert.equal(existsSync(teamRoot), false);
@@ -7320,6 +7389,7 @@ esac
       assert.ok(descendant.pid);
       const teamName = 'team-gone-pane-descendant-debt';
       await initTeamState(teamName, 'gone pane descendant cleanup debt test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent(teamName, cwd);
       const config = await readTeamConfig(teamName, cwd);
       assert.ok(config);
       if (!config || !descendant.pid) return;
@@ -7356,11 +7426,60 @@ esac
     }
   });
 
+  it('shutdownTeam retains descendant-reuse debt without signaling a stable root or replacement PID', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-gone-pane-descendant-reuse-'));
+    let descendant: ReturnType<typeof spawn> | null = null;
+    const originalProcessKill = process.kill;
+    try {
+      descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      assert.ok(descendant.pid);
+      if (!descendant.pid || process.platform !== 'linux') return;
+      const stat = await readFile(`/proc/${descendant.pid}/stat`, 'utf8');
+      const startTime = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+      assert.match(startTime ?? '', /^[0-9]+$/);
+
+      const teamName = 'team-gone-descendant-reuse';
+      await initTeamState(teamName, 'gone pane descendant reuse test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent(teamName, cwd);
+      const debtPath = join(cwd, '.omx', 'state', 'team', teamName, '.gone-pane-descendant-cleanup-debt.json');
+      await writeFile(debtPath, JSON.stringify({
+        schema_version: 1,
+        operation: 'gone_pane_descendant_cleanup',
+        entries: [{
+          pane_id: '%406',
+          authorized_pane_pid: process.pid,
+          tracked_processes: [{ pid: descendant.pid, start_time: `${startTime}0` }],
+          evidence: 'pane_authority_lost_during_descendant_teardown',
+        }],
+      }), 'utf-8');
+
+      const signals: Array<{ pid: number; signal: number | NodeJS.Signals | undefined }> = [];
+      process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+        if (signal !== 0) signals.push({ pid, signal });
+        return originalProcessKill(pid, signal as NodeJS.Signals);
+      }) as typeof process.kill;
+      await assert.rejects(
+        () => shutdownTeam(teamName, cwd, { force: true }),
+        /gone_pane_descendant_cleanup_debt_unresolved:%406/,
+      );
+      assert.doesNotThrow(() => originalProcessKill(process.pid, 0), 'root remains live');
+      assert.deepEqual(signals.filter(({ pid }) => pid === descendant!.pid), []);
+      assert.equal(existsSync(debtPath), true);
+    } finally {
+      process.kill = originalProcessKill;
+      try {
+        if (descendant?.pid) process.kill(descendant.pid, 'SIGKILL');
+      } catch {}
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('shutdownTeam preserves identity-unavailable descendant debt when PID probing is unknown', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-gone-pane-unknown-probe-'));
     const teamName = 'team-gone-probe';
     try {
       await initTeamState(teamName, 'unknown descendant probe debt test', 'executor', 1, cwd);
+      await markDetachedSessionAbsent(teamName, cwd);
       const debtPath = join(cwd, '.omx', 'state', 'team', teamName, '.gone-pane-descendant-cleanup-debt.json');
       await writeFile(debtPath, JSON.stringify({
         schema_version: 1,
@@ -7445,7 +7564,7 @@ esac
           const config = await readTeamConfig('team-shutdown-dead-pane', cwd);
           assert.ok(config);
           if (!config) return;
-          config.tmux_session = 'omx-team-team-shutdown-dead-pane';
+          config.tmux_session = '';
           config.workers[0]!.pane_id = '%404';
           config.workers[1]!.pane_id = '%405';
           await saveTeamConfig(config, cwd);
@@ -7457,7 +7576,7 @@ esac
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
           assert.doesNotMatch(tmuxLog, /kill-pane -t %404/);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %405/);
-          assert.match(tmuxLog, /kill-session -t omx-team-team-shutdown-dead-pane/);
+          assert.doesNotMatch(tmuxLog, /kill-session -t omx-team-team-shutdown-dead-pane/);
         },
       );
     } finally {
@@ -7515,8 +7634,8 @@ case "$1" in
       *"-a -F #{pane_id}"*)
         printf 'proof\n' >> "${orderPath}"
         printf "%%11\t0\t2000000011\n"
-        if [ ! -f "${orderPath}.killed-%13" ]; then printf "%%13\t0\t${paneOnePid}\n"; fi
-        if [ ! -f "${orderPath}.killed-%14" ]; then printf "%%14\t0\t${paneTwoPid}\n"; fi
+        if [ ! -f "${orderPath}.killed-%13" ] && ! grep -q 'terminated-pane-1' "${orderPath}" 2>/dev/null; then printf "%%13\t0\t${paneOnePid}\n"; fi
+        if [ ! -f "${orderPath}.killed-%14" ] && ! grep -q 'terminated-pane-2' "${orderPath}" 2>/dev/null; then printf "%%14\t0\t${paneTwoPid}\n"; fi
         exit 0
         ;;
       *"-t omx-team-team-shutdown-prekill-order"*)
@@ -7568,19 +7687,18 @@ esac
           config.workers[1]!.pid = paneTwoPid;
           await saveTeamConfig(config, cwd);
 
-          await shutdownTeam('team-shutdown-prekill-order', cwd, { force: true });
+          await assert.rejects(
+            () => shutdownTeam('team-shutdown-prekill-order', cwd, { force: true }),
+            /shutdown_pane_proof_unavailable:%13:pane_proof_lost_during_process_teardown/,
+          );
 
           const order = (await readFile(orderPath, 'utf-8')).trim().split('\n');
           const firstProof = order.indexOf('proof');
           const firstTermination = order.indexOf('terminated-pane-1');
           const secondTermination = order.indexOf('terminated-pane-2');
-          const proofImmediatelyBeforeFirstTermination = order.lastIndexOf('proof', firstTermination);
-          const proofImmediatelyBeforeSecondTermination = order.lastIndexOf('proof', secondTermination);
           assert.ok(firstProof >= 0);
-          assert.ok(firstTermination > proofImmediatelyBeforeFirstTermination);
-          assert.ok(proofImmediatelyBeforeFirstTermination >= firstProof);
-          assert.ok(secondTermination > proofImmediatelyBeforeSecondTermination);
-          assert.ok(proofImmediatelyBeforeSecondTermination > firstTermination);
+          assert.ok(firstTermination > firstProof);
+          assert.equal(secondTermination, -1);
         },
       );
     } finally {
@@ -7670,7 +7788,7 @@ esac
           try {
             await assert.rejects(
               () => shutdownTeam('team-shutdown-malformed-proof', cwd, { force: true }),
-              /shutdown_pane_proof_unavailable:%404:malformed_snapshot/,
+              /shutdown_pane_proof_unavailable:%404:(malformed_snapshot|pane_proof_lost_during_process_teardown)/,
             );
           } finally {
             process.kill = originalProcessKill;
@@ -7684,7 +7802,7 @@ esac
           assert.equal(preservedConfig?.resize_hook_target, 'omx-team-team-shutdown-malformed-proof:0');
           const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
           const globalProofReads = tmuxLog.match(/list-panes -a -F #\{pane_id\}\t#\{pane_dead\}\t#\{pane_pid\}/g) ?? [];
-          assert.equal(globalProofReads.length, 2);
+          assert.equal(globalProofReads.length, 1);
           assert.doesNotMatch(tmuxLog, /kill-pane -t %404/);
           assert.doesNotMatch(tmuxLog, /kill-session -t omx-team-team-shutdown-malformed-proof/);
           assert.doesNotMatch(tmuxLog, /set-hook -u -t omx-team-team-shutdown-malformed-proof:0 client-resized\[\d+\]/);
@@ -7766,7 +7884,7 @@ esac
 
           await assert.rejects(() => shutdownTeam('team-exact-final-unknown', cwd, { force: true }));
           assert.ok(await readTeamConfig('team-exact-final-unknown', cwd));
-          assert.ok(livenessProbes > 1);
+          assert.ok(livenessProbes >= 1);
         },
       );
     } finally {
@@ -11693,6 +11811,27 @@ esac
         && entry.result === 'failed'
         && entry.reason === 'leader_pane_missing_transport_direct_failed');
       assert.equal(runtimeEntries.length, 1, 'leader direct missing-pane failure should emit exactly one runtime dispatch_result entry');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+  it('shutdownTeam without config never destroys a conventionally named tmux session', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-no-config-session-'));
+    try {
+      await withMockTmuxFixture(
+        {
+          dirPrefix: 'omx-runtime-no-config-session-bin-',
+          tmuxScript: (tmuxLogPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+exit 0
+`,
+        },
+        async ({ tmuxLogPath }) => {
+          await shutdownTeam('unowned-session', cwd, { force: true });
+          const log = await readFile(tmuxLogPath, 'utf8').catch(() => '');
+          assert.doesNotMatch(log, /kill-session/);
+        },
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -29,6 +29,8 @@ import {
   paneHasOmxInstanceTag,
   readPaneTeamOwnerTagResult,
   restoreStandaloneHudPane,
+  finalizeRestoredHudCleanupDebtSync,
+  reconcileRestoredHudCleanupDebtSync,
   teardownWorkerPanes,
   unregisterResizeHook,
   destroyTeamSession,
@@ -531,6 +533,35 @@ export function shouldPrekillInteractiveShutdownProcessTrees(sessionName: string
   // including native Windows prompt-worker ancestry where pane-targeted
   // teardown alone is insufficient.
   return true;
+}
+
+function destroyConfiguredDetachedTeamSession(config: TeamConfig): void {
+  const sessionName = config.tmux_session;
+  const ownerId = typeof config.tmux_pane_owner_id === 'string' ? config.tmux_pane_owner_id.trim() : '';
+  const leaderPaneId = typeof config.leader_pane_id === 'string' ? config.leader_pane_id.trim() : '';
+  const leaderPanePid = config.leader_pane_pid;
+  // An empty session is explicit persisted evidence that no detached session was
+  // created or remains. It authorizes state cleanup, never a tmux effect.
+  if (!sessionName) return;
+  if (sessionName.includes(':') || !ownerId || !/^%[0-9]+$/.test(leaderPaneId)
+    || typeof leaderPanePid !== 'number' || !Number.isSafeInteger(leaderPanePid) || leaderPanePid <= 0) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName || 'missing_session'}`);
+  }
+  const proof = readExactPaneProofSync(leaderPaneId);
+  if (proof.status !== 'live' || proof.pid !== leaderPanePid) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
+  }
+  const owner = readPaneTeamOwnerTagResult(proof.paneId);
+  if (owner.status !== 'value' || owner.value !== ownerId) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
+  }
+  const finalProof = readExactPaneProofSync(proof.paneId);
+  if (finalProof.status !== 'live' || finalProof.pid !== leaderPanePid) {
+    throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
+  }
+  if (!destroyTeamSession(sessionName)) {
+    throw new Error(`detached_session_destroy_unresolved:${sessionName}`);
+  }
 }
 
 interface UnavailablePaneProof {
@@ -2346,6 +2377,18 @@ type ExactPaneProcessProbe =
  * the pane's global row immediately before that effect. A changed/dead row is
  * not a fallback opportunity: it stops this pane's process-tree teardown.
  */
+function reproveExactPaneAfterProcessEsrcH(
+  paneId: string,
+  authorizedPanePid: number,
+): ExactPaneProcessProbe {
+  const proof = readExactPaneProofSync(paneId);
+  if (proof.status === 'unavailable') return { status: 'unavailable', proof };
+  if (proof.status === 'gone') return { status: 'gone' };
+  // ESRCH establishes only that the process was absent. A still-live pane row
+  // is not authority to advance the pane lifecycle without an absent reproof.
+  return { status: 'stopped' };
+}
+
 function signalExactPaneProcess(
   paneId: string,
   authorizedPanePid: number,
@@ -2358,11 +2401,12 @@ function signalExactPaneProcess(
   if (proof.status === 'gone') return { status: 'stopped' };
   try {
     process.kill(pid, signal);
-  } catch {
-    // A process may exit between the exact proof and its signal. The guarded
-    // wait below establishes whether the tracked tree is already gone.
+    return { status: 'alive' };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+      ? reproveExactPaneAfterProcessEsrcH(paneId, authorizedPanePid)
+      : { status: 'unknown' };
   }
-  return { status: 'alive' };
 }
 
 function probeExactPaneProcess(
@@ -2373,22 +2417,12 @@ function probeExactPaneProcess(
   const proof = readExactPaneProofSync(paneId);
   if (proof.status === 'unavailable') return { status: 'unavailable', proof };
   if (proof.status === 'live' && proof.pid !== authorizedPanePid) return { status: 'stopped' };
-  if (proof.status === 'gone') {
-    try {
-      process.kill(pid, 0);
-      return { status: 'stopped' };
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'ESRCH'
-        ? { status: 'gone' }
-        : { status: 'unknown' };
-    }
-  }
   try {
     process.kill(pid, 0);
-    return { status: 'alive' };
+    return proof.status === 'gone' ? { status: 'stopped' } : { status: 'alive' };
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ESRCH'
-      ? { status: 'gone' }
+      ? reproveExactPaneAfterProcessEsrcH(paneId, authorizedPanePid)
       : { status: 'unknown' };
   }
 }
@@ -2457,10 +2491,18 @@ async function terminateExactPaneProcessTree(
 
   const trackedPids = collectProcessTreePids(authorization.pid);
   if (trackedPids.length === 0) return { terminated: true, stopped: false, trackedPids, authorizedPanePid: authorization.pid };
-  // Birth evidence is only needed if pane authority is subsequently lost while
-  // descendants survive. Capture it opportunistically now, but do not make an
-  // ordinary successful teardown depend on /proc availability.
+  // Birth evidence is mandatory for descendant signals. A pane's pinned PID
+  // authorizes its root process, but a numeric descendant PID is never enough:
+  // its /proc start time must still match immediately before each signal.
   const trackedProcessIdentities = await captureProcessIdentities(trackedPids) ?? undefined;
+  const trackedProcessIdentityByPid = new Map(
+    (trackedProcessIdentities ?? []).map((identity) => [identity.pid, identity]),
+  );
+  const revalidateDescendantIdentity = async (pid: number): Promise<boolean> => {
+    if (pid === authorization.pid) return true;
+    const identity = trackedProcessIdentityByPid.get(pid);
+    return identity !== undefined && (await probeProcessIdentity(identity)) === 'same';
+  };
   for (const pid of trackedPids) {
     if (authorizePaneEffect && !authorizePaneEffect(paneId, authorization.pid)) {
       return {
@@ -2477,10 +2519,13 @@ async function terminateExactPaneProcessTree(
         },
       };
     }
+    if (!await revalidateDescendantIdentity(pid)) {
+      return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
+    }
 
     const signal = signalExactPaneProcess(paneId, authorization.pid, pid, 'SIGTERM');
     if (signal.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid, proofUnavailable: signal.proof };
-    if (signal.status === 'stopped') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
+    if (signal.status === 'stopped' || signal.status === 'unknown') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
   }
   const graceful = await waitForExactPaneTrackedPidsExit(paneId, authorization.pid, trackedPids, graceMs);
   if (graceful.terminated || graceful.stopped) return { ...graceful, trackedProcessIdentities };
@@ -2504,9 +2549,12 @@ async function terminateExactPaneProcessTree(
         },
       };
     }
+    if (!await revalidateDescendantIdentity(pid)) {
+      return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
+    }
     const signal = signalExactPaneProcess(paneId, authorization.pid, pid, 'SIGKILL');
     if (signal.status === 'unavailable') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid, proofUnavailable: signal.proof };
-    if (signal.status === 'stopped') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
+    if (signal.status === 'stopped' || signal.status === 'unknown') return { terminated: false, stopped: true, trackedPids, trackedProcessIdentities, authorizedPanePid: authorization.pid };
   }
   return { ...(await waitForExactPaneTrackedPidsExit(paneId, authorization.pid, trackedPids, killWaitMs)), trackedProcessIdentities };
 }
@@ -3742,6 +3790,7 @@ export async function startTeam(
     };
   } catch (error) {
     const rollbackErrors: string[] = [];
+    let preserveRollbackState = false;
     if (error instanceof CreateTeamSessionPartialError && config) {
       const partialSession = error.partialSession;
       sessionName = partialSession.name;
@@ -3876,8 +3925,10 @@ export async function startTeam(
         }
       } else {
         try {
-          destroyTeamSession(sessionName);
+          if (!config) throw new Error('detached_session_destroy_authorization_unavailable:missing_config');
+          destroyConfiguredDetachedTeamSession(config);
         } catch (cleanupError) {
+          preserveRollbackState = true;
           rollbackErrors.push(`destroyTeamSession: ${String(cleanupError)}`);
         }
       }
@@ -3932,7 +3983,7 @@ export async function startTeam(
       descendantCleanupDebtUnresolved = true;
       rollbackErrors.push(`reconcileGonePaneDescendantCleanupDebt: ${String(cleanupError)}`);
     }
-    if (!descendantCleanupDebtUnresolved) {
+    if (!descendantCleanupDebtUnresolved && !preserveRollbackState) {
       try {
         await cleanupTeamState(sanitized, leaderCwd);
       } catch (cleanupError) {
@@ -4390,16 +4441,22 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) {
     await reconcileGonePaneDescendantCleanupDebt(sanitized, cwd);
-    // No config -- just try to kill tmux session and clean up
-    try {
-      destroyTeamSession(`omx-team-${sanitized}`);
-    } catch (err) {
-      process.stderr.write(`[team/runtime] operation failed: ${err}\n`);
-    }
+    // A missing config is not authority over a conventionally named tmux
+    // session. It may be another team's or a recycled user session.
     await cleanupTeamState(sanitized, cwd);
     await syncTeamModeStateOnShutdown(sanitized, cwd);
     restoreTeamModelInstructionsFile(sanitized);
     return { commitHygieneArtifacts: null };
+  }
+  const restoredHudDebtRoot = join(config.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', sanitized);
+  if (typeof config.hud_pane_id === 'string'
+    && /^%[0-9]+$/.test(config.hud_pane_id)
+    && typeof config.hud_pane_pid === 'number'
+    && Number.isSafeInteger(config.hud_pane_pid)
+    && config.hud_pane_pid > 0) {
+    finalizeRestoredHudCleanupDebtSync(cwd, config.hud_pane_id, config.hud_pane_pid, restoredHudDebtRoot);
+  } else {
+    reconcileRestoredHudCleanupDebtSync(cwd, restoredHudDebtRoot);
   }
   const priorScaleDownCleanup = await reconcileScaleDownCleanupDebt(sanitized, cwd, config);
   if (!priorScaleDownCleanup.ok) throw new Error(priorScaleDownCleanup.error);
@@ -4610,7 +4667,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         undefined,
         initiallyTaggedWorkerPaneIds,
       )
-      : listPaneIds(sessionName);
+      : (sessionName ? listPaneIds(sessionName) : []);
     const excludedSharedWorkerPaneIds = new Set(
       [effectiveLeaderPaneId, effectiveHudPaneId]
         .filter((paneId): paneId is string => typeof paneId === 'string' && /^%[0-9]+$/.test(paneId)),
@@ -4868,6 +4925,8 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         restoredHudPaneId = restoreStandaloneHudPane(trustedHudRestoreLeaderPaneId, cwd, {
           sessionId: leaderSessionId,
           expectedLeaderPanePid: frozenRestoreLeaderAuthorization?.pid,
+          expectedLeaderPaneOwnerId: tmuxPaneOwnerId,
+          stateRoot: join(config.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', sanitized),
           assertLeaderPaneAuthorization: frozenRestoreLeaderAuthorization
             ? () => assertSharedPaneAuthorizationContinuous(frozenRestoreLeaderAuthorization, 'restore leader pane')
             : undefined,
@@ -4887,6 +4946,12 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         config.hud_pane_id = restoredHudPaneId;
         config.hud_pane_pid = restoredHudProof.pid;
         await saveTeamConfig(config, cwd);
+        finalizeRestoredHudCleanupDebtSync(
+          cwd,
+          restoredHudPaneId,
+          restoredHudProof.pid,
+          join(config.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', sanitized),
+        );
       }
     }
 
@@ -4936,13 +5001,9 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     config.resize_hook_target = null;
     await saveTeamConfig(config, cwd);
 
-    // 4. Destroy tmux session
+    // 4. Destroy a detached session only after an authoritative leader proof.
     if (!sessionName.includes(':')) {
-      try {
-        destroyTeamSession(sessionName);
-      } catch (err) {
-        process.stderr.write(`[team/runtime] operation failed: ${err}\n`);
-      }
+      destroyConfiguredDetachedTeamSession(config);
     }
   } else {
     const promptTeardownFailures: string[] = [];

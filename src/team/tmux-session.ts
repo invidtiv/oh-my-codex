@@ -1,6 +1,6 @@
 import { spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { closeSync, chmodSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import {
@@ -119,6 +119,8 @@ export interface RestoreStandaloneHudPaneOptions {
   assertLeaderPaneAuthorization?: () => void;
   /** Canonical state root for durable restored-HUD cleanup debt. */
   stateRoot?: string | null;
+  /** Canonical Team owner tag frozen with the leader for durable replay. */
+  expectedLeaderPaneOwnerId?: string | null;
 }
 
 const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
@@ -230,6 +232,10 @@ type RestoredHudCleanupDebt = {
   pane_pid: number | null;
   leader_pane_id: string;
   leader_pane_pid: number;
+  /** Canonical Team owner tag that authorizes the leader during replay. */
+  leader_pane_owner_id: string | null;
+  /** Immutable HUD command identity: this must remain tied to the frozen leader. */
+  hud_owner_leader_pane_id: string;
 };
 
 function restoredHudCleanupDebtPath(cwd: string, stateRoot?: string | null): string {
@@ -239,6 +245,21 @@ function restoredHudCleanupDebtPath(cwd: string, stateRoot?: string | null): str
   return join(root, '.restored-hud-cleanup-debt.json');
 }
 
+function syncRestoredHudDebtParentSync(path: string): void {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(dirname(path), 'r');
+    fsyncSync(descriptor);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && !(code === 'EPERM' && process.platform === 'win32')) {
+      throw error;
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 function persistRestoredHudCleanupDebtSync(
   cwd: string,
   debt: RestoredHudCleanupDebt,
@@ -246,14 +267,21 @@ function persistRestoredHudCleanupDebtSync(
 ): void {
   const debtPath = restoredHudCleanupDebtPath(cwd, stateRoot);
   mkdirSync(dirname(debtPath), { recursive: true });
-  const temporaryPath = `${debtPath}.${process.pid}.${Date.now()}.tmp`;
+  const temporaryPath = `${debtPath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
   writeFileSync(temporaryPath, `${JSON.stringify(debt)}\n`, { mode: 0o600 });
+  const temporaryDescriptor = openSync(temporaryPath, 'r');
+  try {
+    fsyncSync(temporaryDescriptor);
+  } finally {
+    closeSync(temporaryDescriptor);
+  }
   renameSync(temporaryPath, debtPath);
+  syncRestoredHudDebtParentSync(debtPath);
 }
 
-function clearRestoredHudCleanupDebtIfProvenGoneSync(cwd: string, stateRoot?: string | null): void {
+function parseRestoredHudCleanupDebtSync(cwd: string, stateRoot?: string | null): { path: string; debt: RestoredHudCleanupDebt } | null {
   const debtPath = restoredHudCleanupDebtPath(cwd, stateRoot);
-  if (!existsSync(debtPath)) return;
+  if (!existsSync(debtPath)) return null;
   let debt: RestoredHudCleanupDebt;
   try {
     debt = JSON.parse(readFileSync(debtPath, 'utf8')) as RestoredHudCleanupDebt;
@@ -264,16 +292,60 @@ function clearRestoredHudCleanupDebtIfProvenGoneSync(cwd: string, stateRoot?: st
     || !hasExplicitWorkerPaneId(debt.pane_id)
     || !hasExplicitWorkerPaneId(debt.leader_pane_id)
     || !Number.isSafeInteger(debt.leader_pane_pid) || debt.leader_pane_pid <= 0
+    || !(typeof debt.leader_pane_owner_id === 'string' || debt.leader_pane_owner_id === null)
+    || debt.hud_owner_leader_pane_id !== debt.leader_pane_id
     || (debt.pane_pid !== null && (!Number.isSafeInteger(debt.pane_pid) || debt.pane_pid <= 0))) {
     throw new Error('restored_hud_cleanup_debt_malformed');
   }
+  return { path: debtPath, debt };
+}
+
+function removeRestoredHudCleanupDebtSync(path: string): void {
+  unlinkSync(path);
+  syncRestoredHudDebtParentSync(path);
+}
+
+/**
+ * Replays a prior restored-HUD obligation. A live pane is killable only when
+ * its recorded PID, HUD command identity, and tagged leader identity all
+ * still match; PID-less and ambiguous records remain durable debt.
+ */
+export function reconcileRestoredHudCleanupDebtSync(cwd: string, stateRoot?: string | null): void {
+  const record = parseRestoredHudCleanupDebtSync(cwd, stateRoot);
+  if (!record) return;
+  const { path, debt } = record;
   const proof = readExactPaneProofSync(debt.pane_id);
   if (proof.status === 'gone') {
-    unlinkSync(debtPath);
+    removeRestoredHudCleanupDebtSync(path);
     return;
   }
-  // A live PID-less obligation is debt, never authority to kill or mutate the pane.
-  throw new Error(`restored_hud_cleanup_debt_unresolved:${debt.pane_id}`);
+  if (proof.status !== 'live' || debt.pane_pid === null || proof.pid !== debt.pane_pid || !debt.leader_pane_owner_id) {
+    throw new Error(`restored_hud_cleanup_debt_unresolved:${debt.pane_id}`);
+  }
+  const leader = requireLiveTeamOwnedPaneSync(debt.leader_pane_id, debt.leader_pane_pid, debt.leader_pane_owner_id);
+  const topology = listPanesResult(leader);
+  const hudMatches = !topology.error && topology.panes.filter((pane) => pane.paneId === proof.paneId
+    && hudPaneMatchesOwner(pane, { leaderPaneId: debt.hud_owner_leader_pane_id })).length === 1;
+  if (!hudMatches) throw new Error(`restored_hud_cleanup_debt_unresolved:${debt.pane_id}`);
+  killExactPaneSync(proof.paneId, debt.pane_pid, () => {
+    requireLiveTeamOwnedPaneSync(debt.leader_pane_id, debt.leader_pane_pid, debt.leader_pane_owner_id!);
+  });
+  removeRestoredHudCleanupDebtSync(path);
+}
+
+/** Remove restored-HUD debt only after the canonical config transaction commits the same frozen identity. */
+export function finalizeRestoredHudCleanupDebtSync(
+  cwd: string,
+  paneId: string,
+  panePid: number,
+  stateRoot?: string | null,
+): void {
+  const record = parseRestoredHudCleanupDebtSync(cwd, stateRoot);
+  if (!record) return;
+  if (record.debt.pane_id !== paneId || record.debt.pane_pid !== panePid) {
+    throw new Error(`restored_hud_cleanup_debt_unresolved:${record.debt.pane_id}`);
+  }
+  removeRestoredHudCleanupDebtSync(record.path);
 }
 
 
@@ -2483,7 +2555,6 @@ export function restoreStandaloneHudPane(
 ): string | null {
   const normalizedLeaderPaneId = normalizePaneTarget(leaderPaneId);
   if (!normalizedLeaderPaneId) return null;
-  clearRestoredHudCleanupDebtIfProvenGoneSync(cwd, options.stateRoot);
 
   const omxEntry = resolveOmxCliEntryPath();
   if (!omxEntry || omxEntry.trim() === '') return null;
@@ -2588,6 +2659,8 @@ export function restoreStandaloneHudPane(
     pane_pid: null,
     leader_pane_id: normalizedLeaderPaneId,
     leader_pane_pid: options.expectedLeaderPanePid ?? leaderPanePid,
+    leader_pane_owner_id: options.expectedLeaderPaneOwnerId?.trim() || null,
+    hud_owner_leader_pane_id: normalizedLeaderPaneId,
   }, options.stateRoot);
 
   const hudPanePid = (() => {
@@ -2603,6 +2676,8 @@ export function restoreStandaloneHudPane(
     pane_pid: hudPanePid,
     leader_pane_id: normalizedLeaderPaneId,
     leader_pane_pid: options.expectedLeaderPanePid ?? leaderPanePid,
+    leader_pane_owner_id: options.expectedLeaderPaneOwnerId?.trim() || null,
+    hud_owner_leader_pane_id: normalizedLeaderPaneId,
   }, options.stateRoot);
   if (isNativeWindows()) {
     const exactHudPaneId = requireLiveExactPaneSync(paneId, hudPanePid);
@@ -2621,7 +2696,6 @@ export function restoreStandaloneHudPane(
     runTmux(buildReconcileHudResizeArgs(paneId, HUD_TMUX_TEAM_HEIGHT_LINES, hudPanePid));
   }
   runTmux(['select-pane', '-t', requireAuthorizedLeaderPane()]);
-  unlinkSync(restoredHudCleanupDebtPath(cwd, options.stateRoot));
   return paneId;
 }
 
@@ -3979,13 +4053,12 @@ export async function killWorkerPanes(
   });
 }
 
-// Kill entire tmux session. Tolerates already-dead sessions.
-export function destroyTeamSession(sessionName: string): void {
-  try {
-    runTmux(['kill-session', '-t', sessionName]);
-  } catch {
-    // tolerate
-  }
+// Kill an entire detached tmux session only when the caller has already
+// established ownership. Success requires tmux to accept the kill and a fresh
+// session-list proof that the exact base session is absent.
+export function destroyTeamSession(sessionName: string): boolean {
+  const result = runTmux(['kill-session', '-t', sessionName]);
+  return result.ok && !listTeamSessions().includes(baseSessionName(sessionName));
 }
 
 // List all tmux sessions matching omx-team-* pattern
