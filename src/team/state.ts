@@ -83,6 +83,8 @@ export interface TeamConfig {
   workers: WorkerInfo[];
   created_at: string;
   tmux_session: string; // "omx-team-{name}"
+  tmux_session_id?: string;
+  tmux_session_created?: string;
   next_task_id: number;
   leader_cwd?: string;
   team_state_root?: string;
@@ -107,7 +109,10 @@ export interface TeamConfig {
   display_name?: string;
   requested_name?: string;
   identity_source?: string;
+  /** Monotonic canonical-config generation used to reject stale full-object saves. */
+  config_generation?: number;
 }
+
 
 export interface WorkerInfo {
   name: string; // "worker-1"
@@ -305,6 +310,8 @@ export interface TeamManifestV2 {
   permissions_snapshot: PermissionsSnapshot;
   team_decomposition?: Record<string, unknown>;
   tmux_session: string;
+  tmux_session_id?: string;
+  tmux_session_created?: string;
   worker_count: number;
   workers: WorkerInfo[];
   next_task_id: number;
@@ -325,6 +332,8 @@ export interface TeamManifestV2 {
   display_name?: string;
   requested_name?: string;
   identity_source?: string;
+  /** Matches the canonical config generation for paired config/manifest writes. */
+  config_generation?: number;
 }
 
 export interface TeamWorkspaceMetadata {
@@ -855,6 +864,8 @@ type MembershipTransactionJournal = {
 };
 
 export type TeamMembershipTaskTransaction = {
+  /** Canonical config generation observed with the membership snapshot. */
+  baseGeneration: number;
   tasks: Array<{ taskId: string; oldBytes: string | null; newBytes: string | null }>;
   config: { oldBytes: string; newBytes: string };
   manifest?: { oldBytes: string | null; newBytes: string | null };
@@ -982,6 +993,22 @@ export async function commitTeamMembershipTaskTransaction(
   cwd: string,
   transaction: TeamMembershipTaskTransaction,
 ): Promise<void> {
+  if (!taskMembershipBarrierContext.getStore()?.has(taskMembershipBarrierKey(teamName, cwd))) {
+    throw new Error(`membership_transaction_barrier_required:${teamName}`);
+  }
+  const currentGeneration = await readConfigGenerationRaw(teamName, cwd);
+  if (currentGeneration === null) throw new Error(`team_config_missing:${teamName}`);
+  if (transaction.baseGeneration !== currentGeneration) {
+    throw new Error(`team_membership_stale_generation:${teamName}:${transaction.baseGeneration}:${currentGeneration}`);
+  }
+  const acceptedGeneration = currentGeneration + 1;
+  const nextConfig = JSON.parse(transaction.config.newBytes) as TeamConfig;
+  nextConfig.config_generation = acceptedGeneration;
+  const nextManifest = transaction.manifest?.newBytes === null
+    ? null
+    : transaction.manifest
+      ? { ...(JSON.parse(transaction.manifest.newBytes) as TeamManifestV2), config_generation: acceptedGeneration }
+      : undefined;
   const files: MembershipTransactionFile[] = [
     ...transaction.tasks.map((task) => ({
       path: taskFilePath(teamName, task.taskId, cwd),
@@ -991,14 +1018,14 @@ export async function commitTeamMembershipTaskTransaction(
     {
       path: teamConfigPath(teamName, cwd),
       oldBytes: transaction.config.oldBytes,
-      newBytes: transaction.config.newBytes,
+      newBytes: JSON.stringify(nextConfig, null, 2),
     },
   ];
   if (transaction.manifest) {
     files.push({
       path: teamManifestV2Path(teamName, cwd),
       oldBytes: transaction.manifest.oldBytes,
-      newBytes: transaction.manifest.newBytes,
+      newBytes: nextManifest === null ? null : JSON.stringify(nextManifest, null, 2),
     });
   }
   const journalPath = membershipTransactionPath(teamName, cwd);
@@ -1125,6 +1152,8 @@ export async function initTeamState(
     workers,
     created_at: new Date().toISOString(),
     tmux_session: `omx-team-${teamName}`,
+    tmux_session_id: undefined,
+    tmux_session_created: undefined,
     next_task_id: 1,
     leader_cwd: workspace.leader_cwd,
     team_state_root: workspace.team_state_root,
@@ -1141,9 +1170,13 @@ export async function initTeamState(
     display_name: workspace.display_name,
     requested_name: workspace.requested_name,
     identity_source: workspace.identity_source,
+    config_generation: 0,
+
   };
 
-  await writeAtomic(join(root, 'config.json'), JSON.stringify(config, null, 2));
+  await withTeamTaskBarrier(teamName, cwd, async () => {
+    await writeAtomic(join(root, 'config.json'), JSON.stringify(config, null, 2));
+  });
   await writeTeamPhase(
     teamName,
     {
@@ -1170,6 +1203,8 @@ export async function initTeamState(
       lifecycle_profile: lifecycleProfile,
       permissions_snapshot: permissionsSnapshot,
       tmux_session: config.tmux_session,
+      tmux_session_id: config.tmux_session_id,
+      tmux_session_created: config.tmux_session_created,
       worker_count: workerCount,
       workers,
       next_task_id: 1,
@@ -1207,6 +1242,8 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
       ...existing,
       task: normalized.task,
       tmux_session: normalized.tmux_session,
+      tmux_session_id: normalized.tmux_session_id,
+      tmux_session_created: normalized.tmux_session_created,
       worker_count: normalized.worker_count,
       workers: normalized.workers,
       lifecycle_profile: normalized.lifecycle_profile,
@@ -1226,6 +1263,7 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
       display_name: normalized.display_name ?? existing.display_name,
       requested_name: normalized.requested_name ?? existing.requested_name,
       identity_source: normalized.identity_source ?? existing.identity_source,
+      config_generation: normalized.config_generation,
     };
     await writeTeamManifestV2(merged, cwd);
   }
@@ -1248,6 +1286,8 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
     workers: manifest.workers,
     created_at: manifest.created_at,
     tmux_session: manifest.tmux_session,
+    tmux_session_id: manifest.tmux_session_id,
+    tmux_session_created: manifest.tmux_session_created,
     next_task_id: manifest.next_task_id,
     leader_cwd: manifest.leader_cwd,
     team_state_root: manifest.team_state_root,
@@ -1271,8 +1311,13 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
 
 function normalizeTeamConfig(config: TeamConfig): TeamConfig {
   const workerLaunchMode = config.worker_launch_mode === 'prompt' ? 'prompt' : 'interactive';
+  const configGeneration = typeof config.config_generation === 'number'
+    && Number.isSafeInteger(config.config_generation) && config.config_generation >= 0
+    ? config.config_generation
+    : 0;
   return {
     ...config,
+    config_generation: configGeneration,
     lifecycle_profile: 'default',
     leader_pane_id: config.leader_pane_id ?? null,
     leader_pane_pid: typeof config.leader_pane_pid === 'number' && Number.isSafeInteger(config.leader_pane_pid) && config.leader_pane_pid > 0
@@ -1312,6 +1357,8 @@ function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
     lifecycle_profile: normalized.lifecycle_profile,
     permissions_snapshot: defaultPermissionsSnapshot(),
     tmux_session: normalized.tmux_session,
+    tmux_session_id: normalized.tmux_session_id,
+    tmux_session_created: normalized.tmux_session_created,
     worker_count: normalized.worker_count,
     workers: normalized.workers,
     next_task_id: normalizeNextTaskId(normalized.next_task_id),
@@ -1331,10 +1378,12 @@ function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
     display_name: normalized.display_name,
     requested_name: normalized.requested_name,
     identity_source: normalized.identity_source,
+    config_generation: normalized.config_generation,
   };
 }
 
 export async function writeTeamManifestV2(manifest: TeamManifestV2, cwd: string): Promise<void> {
+  await withTeamTaskBarrier(manifest.name, cwd, async () => {
   const normalizedPolicy = normalizeTeamPolicy(manifest.policy, {
     display_mode: manifest.policy?.display_mode === 'split_pane' ? 'split_pane' : 'auto',
     worker_launch_mode: manifest.policy?.worker_launch_mode === 'prompt' ? 'prompt' : 'interactive',
@@ -1361,6 +1410,7 @@ export async function writeTeamManifestV2(manifest: TeamManifestV2, cwd: string)
       2,
     ),
   );
+  });
 }
 
 async function readTeamManifestV2Raw(teamName: string, cwd: string): Promise<TeamManifestV2 | null> {
@@ -1460,10 +1510,25 @@ async function computeNextTaskIdFromDisk(teamName: string, cwd: string): Promise
   return maxId + 1;
 }
 
+async function readConfigGenerationRaw(teamName: string, cwd: string): Promise<number | null> {
+  try {
+    const raw = JSON.parse(await readFile(teamConfigPath(teamName, cwd), 'utf8')) as { config_generation?: unknown };
+    return typeof raw.config_generation === 'number'
+      && Number.isSafeInteger(raw.config_generation) && raw.config_generation >= 0
+      ? raw.config_generation
+      : 0;
+  } catch {
+    return null;
+  }
+}
+
+
 // Read team config
 async function readTeamConfigRaw(teamName: string, cwd: string): Promise<TeamConfig | null> {
   const v2 = await readTeamManifestV2Raw(teamName, cwd);
-  if (v2) return teamConfigFromManifest(v2);
+  if (v2) return { ...teamConfigFromManifest(v2), config_generation: (await readConfigGenerationRaw(teamName, cwd)) ?? 0 };
+
+
 
   // Attempt idempotent migration on first read.
   const migrated = await migrateV1ToV2(teamName, cwd);
@@ -2675,7 +2740,20 @@ export async function markOwnedTeamsLeaderStopObserved(
 // === Config persistence (public wrapper) ===
 
 export async function saveTeamConfig(config: TeamConfig, cwd: string): Promise<void> {
-  await writeConfig(config, cwd);
+  await withTeamTaskBarrier(config.name, cwd, async () => {
+    // The caller's config is a full canonical replacement; recover any
+    // interrupted membership generation while holding the same barrier before
+    // deriving and writing its manifest companion.
+    await recoverTeamMembershipTaskTransaction(config.name, cwd);
+    const currentGeneration = await readConfigGenerationRaw(config.name, cwd);
+    if (currentGeneration === null) throw new Error(`team_config_missing:${config.name}`);
+    const expectedGeneration = normalizeTeamConfig(config).config_generation!;
+    if (expectedGeneration !== currentGeneration) {
+      throw new Error(`team_config_stale_generation:${config.name}:${expectedGeneration}:${currentGeneration}`);
+    }
+    config.config_generation = currentGeneration + 1;
+    await writeConfig(config, cwd);
+  });
 }
 
 // Delete team state only after excluding both scaling and membership mutations.

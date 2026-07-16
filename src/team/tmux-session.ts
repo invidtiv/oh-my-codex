@@ -64,6 +64,9 @@ function probeProcessLiveness(pid: number): ProcessLiveness {
 
 export interface TeamSession {
   name: string; // tmux target in "session:window" form
+  /** Frozen tmux session incarnation persisted before any detached teardown. */
+  tmuxSessionId?: string;
+  tmuxSessionCreated?: string;
   workerCount: number;
   cwd: string;
   workerPaneIds: string[];
@@ -2498,8 +2501,14 @@ export function createTeamSession(
       );
     }
 
+    const sessionIncarnation = teamTarget.includes(':') ? null : queryDetachedTeamSession(sessionName);
+    if (sessionIncarnation && sessionIncarnation.status !== 'exact') {
+      throw new Error(`tmux_session_incarnation_unavailable:${sessionName}`);
+    }
     return {
       name: teamTarget,
+      tmuxSessionId: sessionIncarnation?.incarnation.sessionId,
+      tmuxSessionCreated: sessionIncarnation?.incarnation.sessionCreated,
       workerCount,
       cwd,
       workerPaneIds,
@@ -4141,6 +4150,13 @@ export type DetachedSessionLeaderBinding = {
   incarnation: DetachedSessionIncarnation;
 };
 
+export type DetachedSessionDestroyAuthorization = DetachedSessionIncarnation & {
+  leaderPaneId: string;
+  leaderPanePid: number;
+  ownerId: string;
+};
+
+
 /**
  * Reads pane and session incarnation in one tmux snapshot. This prevents a
  * same-name replacement from combining a stale session proof with a live pane.
@@ -4214,9 +4230,45 @@ export function queryDetachedTeamSession(
   return { status: 'exact', incarnation };
 }
 
-/** Records tmux accepting the destructive effect separately from its proof. */
-export function requestDetachedTeamSessionDestroy(sessionName: string): boolean {
-  return runTmux(['kill-session', '-t', sessionName]).ok;
+/**
+ * Re-proves every stable authorization component at the destructive sink. The
+ * final tmux command queues an in-server predicate with the kill, so no client
+ * can replace the session or pane between authorization and the effect.
+ */
+function buildDetachedSessionDestroyArgs(expected: DetachedSessionDestroyAuthorization): string[] | null {
+  const leaderPaneId = expected.leaderPaneId.trim();
+  const ownerId = expected.ownerId.trim();
+  if (!/^%[0-9]+$/.test(leaderPaneId)
+    || !Number.isSafeInteger(expected.leaderPanePid)
+    || expected.leaderPanePid <= 0
+    || !/^\$[0-9]+$/.test(expected.sessionId)
+    || !/^[0-9]+$/.test(expected.sessionCreated)
+    || !/^[A-Za-z0-9._:@/-]+$/.test(ownerId)) return null;
+
+  const predicate = [
+    '#{==:#{pane_dead},0}',
+    `#{==:#{pane_id},${leaderPaneId}}`,
+    `#{==:#{pane_pid},${expected.leaderPanePid}}`,
+    `#{==:#{${OMX_TEAM_PANE_OWNER_OPTION}},${ownerId}}`,
+    `#{==:#{session_id},${expected.sessionId}}`,
+    `#{==:#{session_created},${expected.sessionCreated}}`,
+  ].reduce((combined, condition) => `#{&&:${combined},${condition}}`);
+  return ['if-shell', '-F', '-t', leaderPaneId, predicate, `kill-session -t ${expected.sessionId}`, 'run-shell "exit 1"'];
+}
+
+export function requestDetachedTeamSessionDestroy(
+  sessionName: string,
+  expected: DetachedSessionDestroyAuthorization,
+): boolean {
+  const incarnation = { sessionId: expected.sessionId, sessionCreated: expected.sessionCreated };
+  if (queryDetachedTeamSession(sessionName, incarnation).status !== 'exact') return false;
+  if (!queryDetachedSessionLeaderBinding(expected.leaderPaneId, expected.leaderPanePid, sessionName, incarnation)) return false;
+  const pane = readExactPaneProofSync(expected.leaderPaneId);
+  if (pane.status !== 'live' || pane.pid !== expected.leaderPanePid) return false;
+  const owner = readPaneTeamOwnerTagResult(expected.leaderPaneId);
+  if (owner.status !== 'value' || owner.value !== expected.ownerId) return false;
+  const args = buildDetachedSessionDestroyArgs(expected);
+  return args !== null && runTmux(args).ok;
 }
 
 export function destroyTeamSession(sessionName: string): boolean {

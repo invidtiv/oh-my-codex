@@ -46,6 +46,7 @@ import {
   listTeamSessions,
   destroyTeamSession,
   queryDetachedTeamSession,
+  requestDetachedTeamSessionDestroy,
 
   resolveTeamWorkerCli,
   resolveTeamWorkerLaunchMode,
@@ -3647,6 +3648,101 @@ esac
             queryDetachedTeamSession('omx-team-incarnation', { sessionId: '$41', sessionCreated: '1700000001' }),
             entry.expected,
           );
+        },
+      );
+    }
+  });
+
+  it('queues a stable-ID kill behind the exact server-side leader predicate', async () => {
+    await withMockTmuxFixture(
+      'omx-detached-incarnation-stable-kill-',
+      (tmuxLogPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  list-sessions) printf '%s\\n' 'omx-team-incarnation	$41	1700000001' ;;
+  list-panes) case "$*" in *'#{session_name}'*) printf '%s\n' '%1	0	4241	omx-team-incarnation	$41	1700000001' ;; *) printf '%s\n' '%1	0	4241' ;; esac ;;
+  show-option|show-options) printf '%s\\n' 'team:incarnation' ;;
+  if-shell) : > "${tmuxLogPath}.session-killed" ;;
+  *) exit 1 ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.equal(
+          requestDetachedTeamSessionDestroy('omx-team-incarnation', {
+            sessionId: '$41', sessionCreated: '1700000001', leaderPaneId: '%1', leaderPanePid: 4241, ownerId: 'team:incarnation',
+          }),
+          true,
+        );
+        const log = await readFile(logPath, 'utf-8');
+        assert.match(log, /if-shell -F -t %1/);
+        assert.match(log, /#\{==:#\{pane_dead\},0\}/);
+        assert.match(log, /#\{==:#\{pane_id\},%1\}/);
+        assert.match(log, /#\{==:#\{pane_pid\},4241\}/);
+        assert.match(log, /#\{==:#\{@omx_team_pane_owner_id\},team:incarnation\}/);
+        assert.match(log, /#\{==:#\{session_id\},\$41\}/);
+        assert.match(log, /#\{==:#\{session_created\},1700000001\}/);
+        assert.match(log, /kill-session -t \$41/);
+        assert.equal(await readFile(`${logPath}.session-killed`, 'utf8'), '');
+        assert.doesNotMatch(log, /^kill-session -t /m);
+      },
+    );
+  });
+
+  it('reports server-side predicate denial without retrying or accepting a detached kill', async () => {
+    await withMockTmuxFixture(
+      'omx-detached-incarnation-server-denial-',
+      (tmuxLogPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  list-sessions) printf '%s\\n' 'omx-team-denied	$41	1700000001' ;;
+  list-panes) case "$*" in *'#{session_name}'*) printf '%s\\n' '%1	0	4241	omx-team-denied	$41	1700000001' ;; *) printf '%s\\n' '%1	0	4241' ;; esac ;;
+  show-option|show-options) printf '%s\\n' 'team:denied' ;;
+  if-shell) : > "${tmuxLogPath}.denied"; exit 1 ;;
+  kill-session) : > "${tmuxLogPath}.killed" ;;
+  *) exit 1 ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.equal(requestDetachedTeamSessionDestroy('omx-team-denied', {
+          sessionId: '$41', sessionCreated: '1700000001', leaderPaneId: '%1', leaderPanePid: 4241, ownerId: 'team:denied',
+        }), false);
+        const log = await readFile(logPath, 'utf8');
+        assert.match(log, /if-shell -F -t %1/);
+        assert.match(log, /run-shell "exit 1"/);
+        assert.equal(fs.existsSync(`${logPath}.denied`), true);
+        assert.equal(fs.existsSync(`${logPath}.killed`), false);
+        assert.equal((log.match(/if-shell/g) ?? []).length, 1);
+      },
+    );
+  });
+
+  it('fails closed when destroy authority has already drifted', async () => {
+    const cases = [
+      { name: 'session', panePid: 4241, owner: 'team:final', session: '$42\t1700000002' },
+      { name: 'pid', panePid: 9999, owner: 'team:final', session: '$41\t1700000001' },
+      { name: 'owner', panePid: 4241, owner: 'foreign-owner', session: '$41\t1700000001' },
+    ];
+    for (const entry of cases) {
+      await withMockTmuxFixture(
+        `omx-detached-final-composite-${entry.name}-`,
+        (tmuxLogPath) => `#!/bin/sh
+printf '%s\\n' "$*" >> "${tmuxLogPath}"
+case "$1" in
+  list-sessions) printf 'omx-team-final\\t${entry.session}\\n' ;;
+  list-panes) case "$*" in *'#{session_name}'*) printf '%%1\\t0\\t${entry.panePid}\\tomx-team-final\\t$41\\t1700000001\\n' ;; *) printf '%%1\\t0\\t${entry.panePid}\\n' ;; esac ;;
+  show-option|show-options) printf '%s\\n' '${entry.owner}' ;;
+  if-shell) : > "${tmuxLogPath}.session-killed" ;;
+  *) exit 1 ;;
+esac
+`,
+        async ({ logPath }) => {
+          assert.equal(requestDetachedTeamSessionDestroy('omx-team-final', {
+            sessionId: '$41', sessionCreated: '1700000001', leaderPaneId: '%1', leaderPanePid: 4241, ownerId: 'team:final',
+          }), false);
+          const log = await readFile(logPath, 'utf8');
+          assert.doesNotMatch(log, /if-shell/);
+          assert.doesNotMatch(log, /kill-session/);
+          assert.equal(fs.existsSync(`${logPath}.session-killed`), false);
         },
       );
     }

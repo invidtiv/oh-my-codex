@@ -19,6 +19,8 @@ import {
   readTeamConfig,
   saveTeamConfig,
   recoverTeamMembershipTaskTransaction,
+  commitTeamMembershipTaskTransaction,
+  withTeamTaskBarrier,
   readTeamManifestV2,
   transitionTaskStatus,
   releaseTaskClaim,
@@ -287,6 +289,95 @@ describe('team state', () => {
       assert.equal(typeof diskCfg.next_task_id, 'number');
       assert.ok(Array.isArray(diskCfg.workers));
       assert.equal(diskCfg.workers.length, 2);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a stale full config save without overwriting a newer canonical generation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-config-generation-'));
+    try {
+      await initTeamState('team-generation', 'generation test', 'executor', 1, cwd);
+      const first = await readTeamConfig('team-generation', cwd);
+      const stale = await readTeamConfig('team-generation', cwd);
+      assert.ok(first);
+      assert.ok(stale);
+      if (!first || !stale) throw new Error('missing config');
+      first.task = 'newer canonical value';
+      await saveTeamConfig(first, cwd);
+      stale.task = 'stale overwrite';
+      await assert.rejects(() => saveTeamConfig(stale, cwd), /team_config_stale_generation:team-generation:0:1/);
+      assert.equal((await readTeamConfig('team-generation', cwd))?.task, 'newer canonical value');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a stale membership transaction without overwriting the accepted generation', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-membership-generation-'));
+    try {
+      await initTeamState('membership-generation', 'generation test', 'executor', 1, cwd);
+      const teamRoot = join(cwd, '.omx', 'state', 'team', 'membership-generation');
+      const [oldConfig, oldManifest] = await Promise.all([
+        readFile(join(teamRoot, 'config.json'), 'utf8'),
+        readFile(join(teamRoot, 'manifest.v2.json'), 'utf8'),
+      ]);
+      const accepted = await readTeamConfig('membership-generation', cwd);
+      assert.ok(accepted);
+      if (!accepted) throw new Error('missing config');
+      accepted.task = 'accepted update';
+      await saveTeamConfig(accepted, cwd);
+      const staleConfig = { ...JSON.parse(oldConfig) as object, worker_count: 0, workers: [] };
+      const staleManifest = { ...JSON.parse(oldManifest) as object, worker_count: 0, workers: [] };
+      await assert.rejects(
+        withTeamTaskBarrier('membership-generation', cwd, () => commitTeamMembershipTaskTransaction('membership-generation', cwd, {
+          baseGeneration: 0,
+          tasks: [],
+          config: { oldBytes: oldConfig, newBytes: JSON.stringify(staleConfig, null, 2) },
+          manifest: { oldBytes: oldManifest, newBytes: JSON.stringify(staleManifest, null, 2) },
+        })),
+        /team_membership_stale_generation:membership-generation:0:1/,
+      );
+      const [config, manifest] = await Promise.all([
+        readTeamConfig('membership-generation', cwd),
+        readTeamManifestV2('membership-generation', cwd),
+      ]);
+      assert.equal(config?.task, 'accepted update');
+      assert.equal(config?.config_generation, 1);
+      assert.equal(manifest?.config_generation, 1);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes concurrent scale and shutdown membership generations', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-membership-concurrent-generation-'));
+    try {
+      await initTeamState('membership-concurrent', 'generation test', 'executor', 1, cwd);
+      const teamRoot = join(cwd, '.omx', 'state', 'team', 'membership-concurrent');
+      const [oldConfig, oldManifest] = await Promise.all([
+        readFile(join(teamRoot, 'config.json'), 'utf8'),
+        readFile(join(teamRoot, 'manifest.v2.json'), 'utf8'),
+      ]);
+      const commit = (task: string) => withTeamTaskBarrier('membership-concurrent', cwd, () =>
+        commitTeamMembershipTaskTransaction('membership-concurrent', cwd, {
+          baseGeneration: 0,
+          tasks: [],
+          config: { oldBytes: oldConfig, newBytes: JSON.stringify({ ...JSON.parse(oldConfig) as object, task }, null, 2) },
+          manifest: { oldBytes: oldManifest, newBytes: JSON.stringify({ ...JSON.parse(oldManifest) as object, task }, null, 2) },
+        }),
+      );
+      const results = await Promise.allSettled([commit('scale update'), commit('shutdown update')]);
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+      const [config, manifest] = await Promise.all([
+        readTeamConfig('membership-concurrent', cwd),
+        readTeamManifestV2('membership-concurrent', cwd),
+      ]);
+      assert.equal(config?.config_generation, 1);
+      assert.equal(manifest?.config_generation, 1);
+      assert.ok(config?.task === 'scale update' || config?.task === 'shutdown update');
+      assert.equal(manifest?.task, config?.task);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

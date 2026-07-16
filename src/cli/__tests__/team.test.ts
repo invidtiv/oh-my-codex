@@ -2558,10 +2558,12 @@ describe('teamCommand status', () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-status-json-'));
     const previousCwd = process.cwd();
     const previousTeamStateRoot = process.env.OMX_TEAM_STATE_ROOT;
+    const previousPath = process.env.PATH;
     const logs: string[] = [];
     const originalLog = console.log;
     try {
       delete process.env.OMX_TEAM_STATE_ROOT;
+      process.env.PATH = wd;
       process.chdir(wd);
       const config = await withoutTeamTestWorkerEnv(() => initTeamState('pane-json-team', 'inspect worker panes', 'executor', 1, wd));
       await withoutTeamTestWorkerEnv(() => createTask('pane-json-team', {
@@ -2949,6 +2951,8 @@ describe('teamCommand status', () => {
     } finally {
       if (typeof previousTeamStateRoot === 'string') process.env.OMX_TEAM_STATE_ROOT = previousTeamStateRoot;
       else delete process.env.OMX_TEAM_STATE_ROOT;
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
       console.log = originalLog;
       process.chdir(previousCwd);
       await rm(wd, { recursive: true, force: true });

@@ -184,6 +184,12 @@ impl DispatchLog {
         self.records.iter().map(|record| record.request_id.as_str())
     }
 
+    pub fn contains_request_id(&self, request_id: &str) -> bool {
+        self.records
+            .iter()
+            .any(|record| record.request_id == request_id)
+    }
+
     /// Remove records that have reached a terminal delivery state.
     pub fn prune_terminal_records(&mut self) {
         self.records.retain(|record| {

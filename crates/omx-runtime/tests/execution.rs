@@ -179,6 +179,31 @@ fn exec_with_state_dir_persists() {
 }
 
 #[test]
+fn exec_rejects_missing_seen_ledger_after_persisted_dispatch_history() {
+    let dir = std::env::temp_dir().join("omx-runtime-test-exec-missing-seen-ledger");
+    let _ = std::fs::remove_dir_all(&dir);
+    let state_arg = format!("--state-dir={}", dir.display());
+    let queued = Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args([
+            "exec",
+            r#"{"command":"QueueDispatch","request_id":"request-1","target":"worker"}"#,
+            &state_arg,
+        ])
+        .output()
+        .expect("queued dispatch");
+    assert!(queued.status.success());
+    std::fs::remove_file(dir.join("dispatch-seen.json")).expect("removed seen ledger");
+
+    let reloaded = Command::new(env!("CARGO_BIN_EXE_omx-runtime"))
+        .args(["exec", r#"{"command":"CaptureSnapshot"}"#, &state_arg])
+        .output()
+        .expect("reloaded persisted state");
+    assert!(!reloaded.status.success());
+    assert!(String::from_utf8_lossy(&reloaded.stderr).contains("missing dispatch seen ledger"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn exec_ignores_dispatch_compat_without_authoritative_runtime_state() {
     let dir = std::env::temp_dir().join("omx-runtime-test-dispatch-compat-only");
     let _ = std::fs::remove_dir_all(&dir);

@@ -682,6 +682,7 @@ export async function scaleUp(
               next_worker_index: trackedConfig.next_worker_index,
             }, null, 2);
           await commitTeamMembershipTaskTransaction(sanitized, leaderCwd, {
+            baseGeneration: currentConfig.config_generation ?? 0,
             tasks: [],
             config: { oldBytes: currentConfigBytes, newBytes: JSON.stringify(trackedConfig, null, 2) },
             manifest: { oldBytes: currentManifestBytes, newBytes: trackedManifestBytes },
@@ -775,6 +776,7 @@ export async function scaleUp(
         await withTaskMembershipBarrier(sanitized, leaderCwd, async () => {
           await recoverTeamMembershipTaskTransaction(sanitized, leaderCwd);
           const currentConfigBytes = await readFile(configPath, 'utf8');
+          const currentConfig = JSON.parse(currentConfigBytes) as TeamConfig;
           const currentManifestBytes = existsSync(manifestPath) ? await readFile(manifestPath, 'utf8') : null;
           const retainedWorkers = rollbackWorkers.filter((worker) => unresolvedWorkerNames.has(worker.name));
           const desiredByName = new Map(originalConfig.workers.map((worker) => [worker.name, worker]));
@@ -809,6 +811,7 @@ export async function scaleUp(
             });
           }
           await commitTeamMembershipTaskTransaction(sanitized, leaderCwd, {
+            baseGeneration: currentConfig.config_generation ?? 0,
             tasks: taskChanges,
             config: { oldBytes: currentConfigBytes, newBytes: JSON.stringify(desiredConfig, null, 2) },
             manifest: { oldBytes: currentManifestBytes, newBytes: desiredManifestBytes },
@@ -2004,6 +2007,7 @@ export async function scaleDown(
             }, null, 2)
             : null;
           const membershipTransaction = {
+            baseGeneration: currentConfig.config_generation ?? 0,
             tasks: reconciledTasks.map((task) => ({
               taskId: task.id,
               oldBytes: taskSnapshots.get(task.id)?.toString('utf8') ?? null,

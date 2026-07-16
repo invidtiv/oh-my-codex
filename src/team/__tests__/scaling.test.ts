@@ -18,6 +18,7 @@ import {
   withScalingLock,
   recoverTeamMembershipTaskTransaction,
   commitTeamMembershipTaskTransaction,
+  withTeamTaskBarrier,
   DEFAULT_MAX_WORKERS,
   listDispatchRequests,
   readTeamManifestV2,
@@ -58,6 +59,12 @@ function computeGitBlobSha1(content: string): string {
   const buffer = Buffer.from(content, 'utf-8');
   const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
   return createHash('sha1').update(header).update(buffer).digest('hex');
+}
+
+function withoutConfigGeneration(bytes: string): Record<string, unknown> {
+  const value = JSON.parse(bytes) as Record<string, unknown>;
+  delete value.config_generation;
+  return value;
 }
 
 function canonicalContextPackRelativePath(slug: string): string {
@@ -2629,7 +2636,7 @@ exit 0
       );
       assert.equal(tmuxCommands.some((command) => command.startsWith('split-window ')), false);
       assert.equal(tmuxCommands.some((command) => command.startsWith('send-keys ')), false);
-      assert.equal(await readFile(configPath, 'utf-8'), configBefore);
+      assert.deepEqual(withoutConfigGeneration(await readFile(configPath, 'utf-8')), withoutConfigGeneration(configBefore));
       assert.deepEqual((await readdir(tasksDir)).sort(), taskEntriesBefore);
       assert.deepEqual((await readdir(workersDir)).sort(), workerEntriesBefore);
       assert.equal(existsSync(join(workersDir, 'worker-2')), false);
@@ -2720,7 +2727,7 @@ exit 0
       assert.equal(tmuxCommands.filter((command) => command.startsWith('list-panes ')).length, 2);
       assert.equal(tmuxCommands.some((command) => command.startsWith('split-window ')), false);
       assert.equal(tmuxCommands.some((command) => command.startsWith('send-keys ')), false);
-      assert.equal(await readFile(configPath, 'utf-8'), configBefore);
+      assert.deepEqual(withoutConfigGeneration(await readFile(configPath, 'utf-8')), withoutConfigGeneration(configBefore));
       assert.deepEqual((await readdir(tasksDir)).sort(), taskEntriesBefore);
       assert.deepEqual((await readdir(workersDir)).sort(), workerEntriesBefore);
       assert.equal(existsSync(join(workersDir, 'worker-2')), false);
@@ -3195,8 +3202,8 @@ esac
         assert.equal(result.ok, false);
         if (!result.ok) assert.match(result.error, /scale_up_rollback_membership_persistence_failed:.*rollback-persistence-failure/);
         await readTeamConfig(teamName, cwd);
-        assert.equal(await readFile(configPath, 'utf8'), originalConfigBytes);
-        assert.equal(await readFile(manifestPath, 'utf8'), originalManifestBytes);
+        assert.deepEqual(withoutConfigGeneration(await readFile(configPath, 'utf8')), withoutConfigGeneration(originalConfigBytes));
+        assert.deepEqual(withoutConfigGeneration(await readFile(manifestPath, 'utf8')), withoutConfigGeneration(originalManifestBytes));
         assert.equal(existsSync(join(teamDir, '.membership-task-transaction.json')), false);
         assert.equal(await readTask(teamName, '1', cwd), null);
         assert.deepEqual(await listDispatchRequests(teamName, cwd), []);
@@ -4015,13 +4022,14 @@ exit 0
         const nextManifest = { ...JSON.parse(oldManifest) as object, workers: nextConfig.workers, worker_count: nextConfig.workers.length };
         const nextTask = { ...JSON.parse(oldTask) as object, owner: undefined, claim: undefined };
         await assert.rejects(
-          commitTeamMembershipTaskTransaction(teamName, cwd, {
+          withTeamTaskBarrier(teamName, cwd, () => commitTeamMembershipTaskTransaction(teamName, cwd, {
+            baseGeneration: 0,
             tasks: [{ taskId: task.id, oldBytes: oldTask, newBytes: JSON.stringify(nextTask, null, 2) }],
             config: { oldBytes: oldConfig, newBytes: JSON.stringify(nextConfig, null, 2) },
             manifest: { oldBytes: oldManifest, newBytes: JSON.stringify(nextManifest, null, 2) },
             recoverToNewOnFailure: true,
             failRollbackPersistenceAfter: target,
-          }),
+          })),
           /rollback-persistence-failure/,
         );
         assert.equal(existsSync(join(teamDir, '.membership-task-transaction.json')), true);

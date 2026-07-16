@@ -2,7 +2,8 @@ import { createHash } from 'crypto';
 
 
 import { join, resolve, dirname } from 'path';
-import { existsSync, appendFileSync, mkdirSync } from 'fs';
+import { existsSync, appendFileSync, mkdirSync, readFileSync } from 'fs';
+
 import { mkdir, readdir, readFile, writeFile } from 'fs/promises';
 import { performance } from 'perf_hooks';
 import { spawn, spawnSync, type ChildProcessByStdio } from 'child_process';
@@ -96,6 +97,7 @@ import {
   type TeamPolicy,
   type TeamDispatchRequest,
 } from './team-ops.js';
+import { commitTeamMembershipTaskTransaction, writeTeamManifestV2 as writeTeamManifestV2State } from './state.js';
 import {
   queueInboxInstruction,
   queueDirectMailboxMessage,
@@ -321,6 +323,43 @@ async function syncTeamModeStateOnShutdown(
   }
 }
 
+async function mutateShutdownConfig(
+  config: TeamConfig,
+  cwd: string,
+  mutate: (current: TeamConfig) => void,
+): Promise<TeamConfig> {
+  return await withTeamTaskMembershipBarrier(config.name, cwd, async () => {
+    const current = await readTeamConfig(config.name, cwd);
+    if (!current) throw new Error(`shutdown_config_missing:${config.name}`);
+    const baseGeneration = current.config_generation ?? 0;
+    const teamRoot = join(current.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', current.name);
+    const [currentConfigBytes, currentManifestBytes] = await Promise.all([
+      readFile(join(teamRoot, 'config.json'), 'utf8'),
+      existsSync(join(teamRoot, 'manifest.v2.json')) ? readFile(join(teamRoot, 'manifest.v2.json'), 'utf8') : null,
+    ]);
+    mutate(current);
+    const currentManifest = currentManifestBytes === null ? null : JSON.parse(currentManifestBytes) as Record<string, unknown>;
+    await commitTeamMembershipTaskTransaction(current.name, cwd, {
+      baseGeneration,
+      tasks: [],
+      config: { oldBytes: currentConfigBytes, newBytes: JSON.stringify(current, null, 2) },
+      manifest: {
+        oldBytes: currentManifestBytes,
+        newBytes: currentManifest === null ? null : JSON.stringify({
+          ...currentManifest,
+          hud_pane_id: current.hud_pane_id,
+          hud_pane_pid: current.hud_pane_pid,
+          resize_hook_name: current.resize_hook_name,
+          resize_hook_target: current.resize_hook_target,
+        }, null, 2),
+      },
+    });
+    const committed = await readTeamConfig(current.name, cwd);
+    if (!committed) throw new Error(`shutdown_config_missing_after_commit:${current.name}`);
+    return committed;
+  });
+}
+
 async function assertTeamStartupIsNonDestructive(
   teamName: string,
   cwd: string,
@@ -374,6 +413,8 @@ export function applyCreatedInteractiveSessionToConfig(
   workerPaneIds: Array<string | undefined>,
 ): void {
   config.tmux_session = createdSession.name;
+  config.tmux_session_id = createdSession.tmuxSessionId;
+  config.tmux_session_created = createdSession.tmuxSessionCreated;
   config.leader_pane_id = createdSession.leaderPaneId;
   config.hud_pane_id = createdSession.hudPaneId;
   config.leader_pane_pid = typeof createdSession.leaderPanePid === 'number' && Number.isSafeInteger(createdSession.leaderPanePid) && createdSession.leaderPanePid > 0
@@ -556,12 +597,27 @@ function detachedConfigIdentity(teamName: string, cwd: string, config: TeamConfi
   const panePid = config.leader_pane_pid;
   if (config.name !== teamName || !config.created_at || !config.tmux_session || !ownerId || !/^%[0-9]+$/.test(paneId)
     || typeof panePid !== 'number' || !Number.isSafeInteger(panePid) || panePid <= 0) return null;
-  return createHash('sha256').update(JSON.stringify({
-    version: 1, team_name: teamName, state_root: canonicalDetachedStateRoot(config, cwd),
-    name: config.name, created_at: config.created_at, tmux_session: config.tmux_session,
-    leader_pane_id: paneId, leader_pane_pid: panePid, owner_id: ownerId,
-  })).digest('hex');
+  // Bind the durable bytes of both canonical files, not only authorization
+  // fields. A worker/membership mutation invalidates a published receipt.
+  try {
+    const teamRoot = join(canonicalDetachedStateRoot(config, cwd), 'team', teamName);
+    const configBytes = readFileSync(join(teamRoot, 'config.json'), 'utf8');
+    const manifestBytes = readFileSync(join(teamRoot, 'manifest.v2.json'), 'utf8');
+    JSON.parse(configBytes);
+    JSON.parse(manifestBytes);
+    return createHash('sha256').update(JSON.stringify({
+      version: 2,
+      team_name: teamName,
+      state_root: canonicalDetachedStateRoot(config, cwd),
+      config_bytes: configBytes,
+      manifest_bytes: manifestBytes,
+    })).digest('hex');
+  } catch {
+    return null;
+  }
+
 }
+
 
 type DetachedSessionDestroyReceipt = {
   schema_version: 2;
@@ -570,7 +626,8 @@ type DetachedSessionDestroyReceipt = {
   status: 'intent' | 'accepted';
   team_name: string;
   state_root: string;
-  config_identity_version: 1;
+  config_identity_version: 2;
+
   config_identity_digest: string;
   session_name: string;
   session_id: string;
@@ -596,7 +653,8 @@ function isDetachedSessionDestroyReceipt(value: unknown): value is DetachedSessi
     && receipt.operation === 'detached_session_destroy' && (receipt.status === 'intent' || receipt.status === 'accepted')
     && typeof receipt.team_name === 'string' && receipt.team_name.length > 0
     && typeof receipt.state_root === 'string' && receipt.state_root.length > 0 && resolve(receipt.state_root) === receipt.state_root
-    && receipt.config_identity_version === 1 && typeof receipt.config_identity_digest === 'string' && /^[a-f0-9]{64}$/.test(receipt.config_identity_digest)
+    && receipt.config_identity_version === 2 && typeof receipt.config_identity_digest === 'string' && /^[a-f0-9]{64}$/.test(receipt.config_identity_digest)
+
     && typeof receipt.session_name === 'string' && receipt.session_name.length > 0 && !receipt.session_name.includes(':')
     && typeof receipt.session_id === 'string' && receipt.session_id.length > 0 && !/\s/.test(receipt.session_id)
     && typeof receipt.session_created === 'string' && /^[0-9]+$/.test(receipt.session_created)
@@ -623,8 +681,10 @@ async function writeDetachedSessionDestroyReceipt(teamName: string, cwd: string,
 
 function validateDetachedReceiptConfig(teamName: string, cwd: string, config: TeamConfig, receipt: DetachedSessionDestroyReceipt): void {
   if (receipt.team_name !== teamName || receipt.state_root !== canonicalDetachedStateRoot(config, cwd)
-    || receipt.config_identity_version !== 1 || detachedConfigIdentity(teamName, cwd, config) !== receipt.config_identity_digest
-    || config.tmux_session !== receipt.session_name || config.leader_pane_id !== receipt.leader_pane_id
+    || receipt.config_identity_version !== 2 || detachedConfigIdentity(teamName, cwd, config) !== receipt.config_identity_digest
+
+    || config.tmux_session !== receipt.session_name || config.tmux_session_id !== receipt.session_id
+    || config.tmux_session_created !== receipt.session_created || config.leader_pane_id !== receipt.leader_pane_id
     || config.leader_pane_pid !== receipt.leader_pane_pid || config.tmux_pane_owner_id !== receipt.owner_id) {
     throw new Error(`detached_session_destroy_receipt_config_mismatch:${receipt.session_name}`);
   }
@@ -642,6 +702,17 @@ function assertDetachedSessionDestroyAuthority(receipt: DetachedSessionDestroyRe
   const owner = readPaneTeamOwnerTagResult(proof.paneId);
   if (owner.status !== 'value' || owner.value !== receipt.owner_id) throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
 }
+
+function requestDetachedSessionDestroyAtFinalSink(receipt: DetachedSessionDestroyReceipt): boolean {
+  return requestDetachedTeamSessionDestroy(receipt.session_name, {
+    sessionId: receipt.session_id,
+    sessionCreated: receipt.session_created,
+    leaderPaneId: receipt.leader_pane_id,
+    leaderPanePid: receipt.leader_pane_pid,
+    ownerId: receipt.owner_id,
+  });
+}
+
 
 async function withDetachedSessionDestroyLock<T>(teamName: string, cwd: string, fn: () => Promise<T>): Promise<T> {
   return await withTeamTaskMembershipBarrier(teamName, cwd, fn);
@@ -663,7 +734,10 @@ async function convergeDetachedSessionDestroyReceiptUnlocked(teamName: string, c
   if (!config) throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
   validateDetachedReceiptConfig(teamName, cwd, config, receipt);
   assertDetachedSessionDestroyAuthority(receipt);
-  if (!requestDetachedTeamSessionDestroy(receipt.session_name)) throw new Error(`detached_session_destroy_unresolved:${receipt.session_name}`);
+  if (!requestDetachedSessionDestroyAtFinalSink(receipt)) {
+    throw new Error(`detached_session_destroy_unresolved:${receipt.session_name}`);
+  }
+
   await writeDetachedSessionDestroyReceipt(teamName, cwd, config, { ...receipt, status: 'accepted' });
   return await convergeDetachedSessionDestroyReceiptUnlocked(teamName, cwd, config, { ...receipt, status: 'accepted' });
 }
@@ -671,52 +745,57 @@ async function convergeDetachedSessionDestroyReceiptUnlocked(teamName: string, c
 async function reconcileDetachedSessionDestroyReceipt(teamName: string, cwd: string, config: TeamConfig | null): Promise<boolean> {
   return await withDetachedSessionDestroyLock(teamName, cwd, async () => {
     const canonical = await readTeamConfig(teamName, cwd);
-    // Never validate a receipt against a caller-held object: the canonical file
-    // is reloaded under the lifecycle lock before any recovery effect.
     const receipt = await readDetachedSessionDestroyReceipt(teamName, cwd, canonical ?? config);
-    return receipt ? await convergeDetachedSessionDestroyReceiptUnlocked(teamName, cwd, canonical, receipt) : false;
+    if (!receipt) return false;
+    if (!canonical) {
+      // Name/file presence is not authority. Accepted absence requires a
+      // successfully parsed current canonical generation.
+      throw new Error(`detached_session_destroy_authorization_unavailable:${receipt.session_name}`);
+    }
+
+    return await convergeDetachedSessionDestroyReceiptUnlocked(teamName, cwd, canonical, receipt);
   });
 }
 
 async function destroyConfiguredDetachedTeamSession(teamName: string, cwd: string, config: TeamConfig): Promise<void> {
   if (!config.tmux_session) return;
   await withDetachedSessionDestroyLock(teamName, cwd, async () => {
-    const sessionName = config.tmux_session;
-    const digest = detachedConfigIdentity(teamName, cwd, config);
-    const ownerId = typeof config.tmux_pane_owner_id === 'string' ? config.tmux_pane_owner_id.trim() : '';
-    const leaderPaneId = typeof config.leader_pane_id === 'string' ? config.leader_pane_id.trim() : '';
-    const leaderPanePid = config.leader_pane_pid;
     const canonical = await readTeamConfig(teamName, cwd);
+    if (!canonical) throw new Error(`detached_session_destroy_authorization_unavailable:${config.tmux_session}`);
     const existing = await readDetachedSessionDestroyReceipt(teamName, cwd, canonical);
     if (existing) {
       await convergeDetachedSessionDestroyReceiptUnlocked(teamName, cwd, canonical, existing);
       return;
     }
-    const initial = queryDetachedTeamSession(sessionName);
-    if (initial.status === 'absent') return;
-    if (!digest || !sessionName || !ownerId || !/^%[0-9]+$/.test(leaderPaneId)
-      || typeof leaderPanePid !== 'number' || !Number.isSafeInteger(leaderPanePid) || leaderPanePid <= 0 || initial.status !== 'exact') {
+    const sessionName = canonical.tmux_session;
+    const sessionId = typeof canonical.tmux_session_id === 'string' ? canonical.tmux_session_id : '';
+    const sessionCreated = typeof canonical.tmux_session_created === 'string' ? canonical.tmux_session_created : '';
+    const digest = detachedConfigIdentity(teamName, cwd, canonical);
+    const ownerId = typeof canonical.tmux_pane_owner_id === 'string' ? canonical.tmux_pane_owner_id.trim() : '';
+    const leaderPaneId = typeof canonical.leader_pane_id === 'string' ? canonical.leader_pane_id.trim() : '';
+    const leaderPanePid = canonical.leader_pane_pid;
+    if (!digest || !sessionName || !/^\$[0-9]+$/.test(sessionId) || !/^[0-9]+$/.test(sessionCreated) || !ownerId || !/^%[0-9]+$/.test(leaderPaneId)
+      || typeof leaderPanePid !== 'number' || !Number.isSafeInteger(leaderPanePid) || leaderPanePid <= 0) {
       throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName || 'missing_session'}`);
     }
     const receipt: DetachedSessionDestroyReceipt = {
       schema_version: 2, schema: 'omx.detached_session_destroy.v2', operation: 'detached_session_destroy', status: 'intent',
-      team_name: teamName, state_root: canonicalDetachedStateRoot(config, cwd), config_identity_version: 1, config_identity_digest: digest,
-      session_name: sessionName, session_id: initial.incarnation.sessionId, session_created: initial.incarnation.sessionCreated,
+      team_name: teamName, state_root: canonicalDetachedStateRoot(canonical, cwd), config_identity_version: 2, config_identity_digest: digest,
+      session_name: sessionName, session_id: sessionId, session_created: sessionCreated,
       leader_pane_id: leaderPaneId, leader_pane_pid: leaderPanePid, owner_id: ownerId,
     };
     assertDetachedSessionDestroyAuthority(receipt);
-    await writeDetachedSessionDestroyReceipt(teamName, cwd, config, receipt);
+    await writeDetachedSessionDestroyReceipt(teamName, cwd, canonical, receipt);
     const afterJournalHook = detachedSessionDestroyAfterJournalHook;
-    // A test hook is an edge-triggered mutation point, not a re-entrant
-    // lifecycle callback. Clear it before awaiting so nested/retry recovery
-    // cannot recursively publish another drift while this lock is held.
     detachedSessionDestroyAfterJournalHook = null;
     await afterJournalHook?.();
     const current = await readTeamConfig(teamName, cwd);
     if (!current) throw new Error(`detached_session_destroy_authorization_unavailable:${sessionName}`);
     validateDetachedReceiptConfig(teamName, cwd, current, receipt);
     assertDetachedSessionDestroyAuthority(receipt);
-    if (!requestDetachedTeamSessionDestroy(sessionName)) throw new Error(`detached_session_destroy_unresolved:${sessionName}`);
+    if (!requestDetachedSessionDestroyAtFinalSink(receipt)) {
+      throw new Error(`detached_session_destroy_unresolved:${sessionName}`);
+    }
     await writeDetachedSessionDestroyReceipt(teamName, cwd, current, { ...receipt, status: 'accepted' });
     await convergeDetachedSessionDestroyReceiptUnlocked(teamName, cwd, current, { ...receipt, status: 'accepted' });
   });
@@ -3136,11 +3215,7 @@ async function writeDecompositionArtifacts(
 
   const manifest = await readTeamManifestV2(teamName, cwd);
   if (manifest) {
-    await writeFile(
-      join(root, 'manifest.v2.json'),
-      JSON.stringify({ ...manifest, team_decomposition: metadata }, null, 2),
-      'utf8',
-    );
+    await writeTeamManifestV2State({ ...manifest, team_decomposition: { ...metadata } }, cwd);
   }
 }
 
@@ -4595,7 +4670,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   const confirmIssues = options.confirmIssues === true;
   let skipWorkerAcks = false;
   const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
-  const config = await readTeamConfig(sanitized, cwd);
+  let config = await readTeamConfig(sanitized, cwd);
   if (!config) {
     await reconcileDetachedSessionDestroyReceipt(sanitized, cwd, null);
     await reconcileGonePaneDescendantCleanupDebt(sanitized, cwd);
@@ -4610,6 +4685,8 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   // effect. A receipt is the only durable authority across the kill/query crash
   // window and is deliberately fail-closed on malformed or unavailable input.
   await reconcileDetachedSessionDestroyReceipt(sanitized, cwd, config);
+  config = await readTeamConfig(sanitized, cwd);
+  if (!config) throw new Error(`shutdown_config_missing_after_detached_reconciliation:${sanitized}`);
   const restoredHudDebtRoot = join(config.team_state_root ?? resolveCanonicalTeamStateRoot(cwd), 'team', sanitized);
   const configuredRestoredHudPaneId = typeof config.hud_pane_id === 'string' && /^%[0-9]+$/.test(config.hud_pane_id)
     ? config.hud_pane_id
@@ -4639,9 +4716,11 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
       // The config identity is not the debt identity. Remove it durably before
       // replaying the pinned obligation: a later detached-session teardown must
       // not treat a live, same-PID/owner non-HUD pane as the restored HUD.
-      config.hud_pane_id = null;
-      config.hud_pane_pid = undefined;
-      await saveTeamConfig(config, cwd);
+      config = await mutateShutdownConfig(config, cwd, (current) => {
+        current.hud_pane_id = null;
+        current.hud_pane_pid = undefined;
+      });
+
       reconcileRestoredHudCleanupDebtSync(cwd, restoredHudDebtRoot);
     }
   } else {
@@ -4778,20 +4857,20 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         throw new Error(`shutdown_rejected:${detail}`);
       }
 
-      const anyAlive = config.workers.some((w) => (
-        config.worker_launch_mode === 'prompt'
-          ? isPromptWorkerAlive(config, w)
-          : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config.tmux_pane_owner_id ?? undefined, config.hud_pane_id ?? undefined)
+      const anyAlive = config!.workers.some((w) => (
+        config!.worker_launch_mode === 'prompt'
+          ? isPromptWorkerAlive(config!, w)
+          : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config!.tmux_pane_owner_id ?? undefined, config!.hud_pane_id ?? undefined)
       ));
       if (!anyAlive) break;
       // Sleep 2s
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
-    const anyAliveAfterWait = config.workers.some((w) => (
-      config.worker_launch_mode === 'prompt'
-        ? isPromptWorkerAlive(config, w)
-        : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config.tmux_pane_owner_id ?? undefined, config.hud_pane_id ?? undefined)
+    const anyAliveAfterWait = config!.workers.some((w) => (
+      config!.worker_launch_mode === 'prompt'
+        ? isPromptWorkerAlive(config!, w)
+        : isWorkerAlive(sessionName, w.index, w.pane_id, w.pid, config!.tmux_pane_owner_id ?? undefined, config!.hud_pane_id ?? undefined)
     ));
     if (anyAliveAfterWait && !force) {
       // Workers may have accepted shutdown but not exited (Codex TUI requires explicit exit).
@@ -4986,7 +5065,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         }
 
 
-        const persistedPid = config.workers.find((worker) => worker.pane_id?.trim() === proof.paneId)?.pid;
+        const persistedPid = config!.workers.find((worker) => worker.pane_id?.trim() === proof.paneId)?.pid;
         if (canonicalExplicitWorkerPaneIds.has(proof.paneId)
           && (typeof persistedPid !== 'number' || !Number.isSafeInteger(persistedPid) || persistedPid <= 0)) {
           return [{ status: 'unavailable' as const, paneId: proof.paneId, reason: 'pane_pid_changed' as const, detail: 'canonical persisted pane PID is missing' }];
@@ -5016,7 +5095,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     }
     const authorizeFrozenSharedWorkerProcessSignal = (paneId: string, panePid: number): boolean => {
       const expectedPid = expectedSharedWorkerPanePids.get(paneId)
-        ?? config.workers.find((worker) => worker.pane_id === paneId)?.pid;
+        ?? config!.workers.find((worker) => worker.pane_id === paneId)?.pid;
       if (expectedPid !== panePid) return false;
       if (sharedSessionTopology && frozenSharedWorkerOwnerIds.has(paneId)) {
         const expectedOwner = frozenSharedWorkerOwnerIds.get(paneId);
@@ -5059,9 +5138,9 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
 
       }
       if (paneProcessProofUnavailable.length > 0) {
-        await saveTeamConfig(config, cwd);
         assertPaneTeardownProofsAvailable('shutdown', paneProcessProofUnavailable);
       }
+
     }
 
     // Revalidate ownership of the frozen discovered members, then re-prove the
@@ -5135,9 +5214,11 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
         if (restoredHudProof.status !== 'live') {
           throw new Error(`shutdown_restored_hud_pane_proof_unavailable:${restoredHudPaneId}`);
         }
-        config.hud_pane_id = restoredHudPaneId;
-        config.hud_pane_pid = restoredHudProof.pid;
-        await saveTeamConfig(config, cwd);
+        config = await mutateShutdownConfig(config, cwd, (current) => {
+          current.hud_pane_id = restoredHudPaneId;
+          current.hud_pane_pid = restoredHudProof.pid;
+        });
+
         finalizeRestoredHudCleanupDebtSync(
           cwd,
           restoredHudPaneId,
@@ -5191,9 +5272,10 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     if (workerTeardown.kill.failed > 0) {
       throw new Error(`shutdown_pane_teardown_failed:${workerTeardown.kill.failedPaneIds.join(',')}`);
     }
-    config.resize_hook_name = null;
-    config.resize_hook_target = null;
-    await saveTeamConfig(config, cwd);
+    config = await mutateShutdownConfig(config, cwd, (current) => {
+      current.resize_hook_name = null;
+      current.resize_hook_target = null;
+    });
 
     // 4. Destroy a detached session only after an authoritative leader proof.
     if (!sessionName.includes(':')) {
